@@ -75,7 +75,7 @@ func TestXrayJSONSubscriptionPreservesOutbounds(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	wantHysteria["tag"] = "resist--hy2--Япония - Игровой"
+	wantHysteria["tag"] = "resist--hy2--🇯🇵 Япония - Игровой"
 	assertDeepEqual(t, outbounds[0], wantHysteria)
 	wantXHTTP["tag"] = "resist--xhttp--Япония"
 	stream := wantXHTTP["streamSettings"].(map[string]any)

@@ -236,7 +236,7 @@ func TestGeneratesSortedConfigFromBase64Subscription(t *testing.T) {
 				},
 			},
 			map[string]any{
-				"tag":      "mix--FancyNode",
+				"tag":      "mix--Fancy/Node!",
 				"protocol": "vless",
 				"settings": map[string]any{
 					"vnext": []any{

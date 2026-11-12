@@ -1,0 +1,73 @@
+package main
+
+import (
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestHardwareID(t *testing.T) {
+	serial := keeneticSerial("model: Keenetic\n serial: SN-1234\n")
+	assertDeepEqual(t, serial, "sn-1234")
+	assertDeepEqual(t, usableSerial(" SN-1234\x00\n"), serial)
+	assertDeepEqual(t, keeneticSerial("serial: S1749WF***"), "")
+	id := hardwareID("serial", serial)
+	if len(id) != 64 || id != hardwareID("serial", usableSerial("sn-1234")) ||
+		id == hardwareID("serial", "sn-1235") {
+		t.Fatal("hardware identifiers should be stable, distinct and 64 characters")
+	}
+}
+
+func TestPermanentEthernetMAC(t *testing.T) {
+	root := t.TempDir()
+	for name, address := range map[string]string{
+		"eth0": "24:01:02:03:04:05",
+		"eth1": "24:01:02:03:04:06",
+		"br0":  "24:01:02:03:04:07",
+	} {
+		dir := filepath.Join(root, name)
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if name != "br0" {
+			if err := os.Mkdir(filepath.Join(dir, "device"), 0700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for file, data := range map[string]string{"type": "1", "addr_assign_type": "0", "address": address} {
+			if err := os.WriteFile(filepath.Join(dir, file), []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	assertDeepEqual(t, permanentEthernetMAC(root), "24:01:02:03:04:05")
+	if err := os.WriteFile(filepath.Join(root, "eth0", "addr_assign_type"), []byte("3"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	assertDeepEqual(t, permanentEthernetMAC(root), "24:01:02:03:04:06")
+}
+
+func TestSubscriptionRequestSendsHWID(t *testing.T) {
+	hwid := hardwareID("serial", "test-device")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Hwid") != hwid || r.UserAgent() != subscriptionUserAgent {
+			t.Error("request did not carry the expected HWID and User-Agent")
+		}
+		if r.URL.Path == "/limit" {
+			w.Header().Set("X-Hwid-Max-Devices-Reached", "true")
+			return
+		}
+		w.Write([]byte("subscription"))
+	}))
+	defer server.Close()
+
+	if body, err := doHTTPRequest(server.URL, hwid, false); err != nil || body != "subscription" {
+		t.Fatalf("unexpected response: %q, %v", body, err)
+	}
+	if _, err := doHTTPRequest(server.URL+"/limit", hwid, false); !errors.Is(err, errHWIDLimit) {
+		t.Fatalf("expected a device limit error, got %v", err)
+	}
+}

@@ -11,20 +11,22 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
 )
 
-const managedStateName = "subscription.json"
+const (
+	managedStateName = "subscription.json"
+	modeBalance      = "balance"
+	modeOutbounds    = "outbounds"
+)
 
 type managedSubscription struct {
-	URL     string `json:"url"`
-	Profile string `json:"profile,omitempty"`
-	Tag     string `json:"tag"`
+	URL  string `json:"url"`
+	Tag  string `json:"tag"`
+	Mode string `json:"mode"`
 }
 
 type managedPaths struct {
@@ -58,7 +60,11 @@ func newSetupCmd() *cobra.Command {
 			if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
 				return fmt.Errorf("нужна ссылка подписки, начинающаяся с https:// или http://")
 			}
-			return routerPaths.update(address, in, out)
+			mode, err := readSetupMode(in, out)
+			if err != nil {
+				return err
+			}
+			return routerPaths.update(address, mode, out)
 		},
 	}
 }
@@ -69,7 +75,7 @@ func newRefreshCmd() *cobra.Command {
 		Short: "Обновить настроенную подписку",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return routerPaths.update("", nil, cmd.OutOrStdout())
+			return routerPaths.update("", "", cmd.OutOrStdout())
 		},
 	}
 }
@@ -82,63 +88,38 @@ func readSetupLine(in *bufio.Reader) (string, error) {
 	return strings.TrimSpace(text), nil
 }
 
-func selectManagedProfile(body, saved string, in *bufio.Reader, out io.Writer) (managedProfile, string, error) {
-	if strings.HasPrefix(body, "[") || strings.HasPrefix(body, "{") {
-		profiles, err := decodeXrayProfiles(body)
+func readSetupMode(in *bufio.Reader, out io.Writer) (string, error) {
+	for {
+		fmt.Fprintln(out, "1. Заменить балансировщики и мониторинг Xray, сохранив правила маршрутизации.")
+		fmt.Fprintln(out, "2. Только создать файл с серверами подписки.")
+		fmt.Fprint(out, "Выберите 1 или 2 [2]: ")
+		answer, err := readSetupLine(in)
 		if err != nil {
-			return managedProfile{}, "", err
+			return "", err
 		}
-		candidates := findManagedProfiles(profiles)
-		if in == nil && saved != "" {
-			matches := slices.DeleteFunc(candidates, func(p managedProfile) bool { return p.name != saved })
-			if len(matches) != 1 {
-				return managedProfile{}, "", fmt.Errorf("сохранённый профиль автобалансировки исчез или неоднозначен. Запустите setup")
-			}
-			return matches[0], saved, nil
+		switch answer {
+		case "1":
+			return modeBalance, nil
+		case "", "2":
+			return modeOutbounds, nil
+		default:
+			fmt.Fprintln(out, "Введите 1 или 2.")
 		}
-		if len(candidates) == 1 {
-			return candidates[0], candidates[0].name, nil
-		}
-		if len(candidates) > 1 && in == nil {
-			return managedProfile{}, "", fmt.Errorf("в подписке несколько профилей автобалансировки. Запустите setup")
-		}
-		if len(candidates) > 1 && in != nil {
-			fmt.Fprintln(out, "Выберите профиль автобалансировки:")
-			for i, p := range candidates {
-				fmt.Fprintf(out, "%d. %s\n", i+1, p.name)
-			}
-			fmt.Fprint(out, "Номер профиля: ")
-			answer, err := readSetupLine(in)
-			if err != nil {
-				return managedProfile{}, "", err
-			}
-			index, err := strconv.Atoi(answer)
-			if err != nil || index < 1 || index > len(candidates) {
-				return managedProfile{}, "", fmt.Errorf("неверный номер профиля")
-			}
-			profile := candidates[index-1]
-			for i, candidate := range candidates {
-				if i != index-1 && candidate.name == profile.name {
-					return managedProfile{}, "", fmt.Errorf("у нескольких профилей одинаковое имя. Укажите уникальные названия в панели")
-				}
-			}
-			return profile, profile.name, nil
-		}
-		entries, err := parseXraySubscription(body)
-		if err != nil {
-			return managedProfile{}, "", err
-		}
-		profile, err := ordinaryManagedProfile(entries)
-		return profile, "", err
 	}
-	if in == nil && saved != "" {
-		return managedProfile{}, "", fmt.Errorf("профиль автобалансировки требует выдачу Xray JSON")
-	}
-	profile, err := ordinaryManagedProfile(parseLinkOutbounds(body, managedTag, false))
-	return profile, "", err
 }
 
-func (p managedPaths) update(address string, in *bufio.Reader, out io.Writer) error {
+func compileManagedSubscription(body string) (managedProfile, error) {
+	if strings.HasPrefix(body, "[") || strings.HasPrefix(body, "{") {
+		entries, err := parseXraySubscription(body)
+		if err != nil {
+			return managedProfile{}, err
+		}
+		return ordinaryManagedProfile(entries)
+	}
+	return ordinaryManagedProfile(parseLinkOutbounds(body, managedTag, false))
+}
+
+func (p managedPaths) update(address, mode string, out io.Writer) error {
 	if err := os.MkdirAll(p.stateDir, 0700); err != nil {
 		return err
 	}
@@ -162,21 +143,24 @@ func (p managedPaths) update(address string, in *bufio.Reader, out io.Writer) er
 			return fmt.Errorf("не удалось прочитать сохранённые настройки подписки")
 		}
 	}
-	isSetup := in != nil
+	isSetup := address != ""
 	if isSetup {
 		settings.URL = address
+		settings.Mode = mode
 	} else if settings.URL == "" {
 		return fmt.Errorf("сначала запустите %s setup", watcherPath)
+	}
+	if settings.Mode != modeBalance && settings.Mode != modeOutbounds {
+		return fmt.Errorf("не выбран режим обновления, запустите %s setup", watcherPath)
 	}
 	body, err := fetchSubscription(subscription{tag: managedTag, url: settings.URL})
 	if err != nil {
 		return fmt.Errorf("не удалось получить подписку: %w", err)
 	}
-	profile, profileName, err := selectManagedProfile(body, settings.Profile, in, out)
+	profile, err := compileManagedSubscription(body)
 	if err != nil {
 		return err
 	}
-	settings.Profile = profileName
 	var oldCron, newCron []byte
 	if isSetup {
 		oldCron, err = loadCrontab()
@@ -188,7 +172,7 @@ func (p managedPaths) update(address string, in *bufio.Reader, out io.Writer) er
 			return err
 		}
 	}
-	files, err := p.prepareXrayChanges(profile, settings.Tag)
+	files, err := p.prepareXrayChanges(profile, settings.Tag, settings.Mode == modeBalance)
 	if err != nil {
 		return err
 	}
@@ -199,20 +183,34 @@ func (p managedPaths) update(address string, in *bufio.Reader, out io.Writer) er
 			return err
 		}
 		files = append(files, routerChange{before: previous, data: data, mode: 0600})
-		backup, err := p.backupSetup(files, oldCron)
+		backup, err := p.backupXrayConfig()
+		if err != nil {
+			return fmt.Errorf("не удалось скопировать конфиги Xray: %w", err)
+		}
+		fmt.Fprintf(out, "Копия конфигов Xray: %s\n", backup)
+		backup, err = p.backupSetup(previous, oldCron)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "Резервная копия: %s\n", backup)
+		fmt.Fprintf(out, "Копия настроек Watcher и crontab: %s\n", backup)
 	}
-	if err := applyRouterChanges(files, oldCron, newCron, configChanged); err != nil {
+	restart := configChanged && settings.Mode == modeBalance
+	if err := applyRouterChanges(files, oldCron, newCron, restart); err != nil {
 		return err
 	}
 	if isSetup {
-		fmt.Fprintf(out, "Подписка настроена. Профиль: %s.\n", profile.name)
-		fmt.Fprintln(out, "Чтобы поменять ссылку, запустите "+watcherPath+" setup")
+		fmt.Fprintln(out, "Подписка настроена. Загружены отдельные серверы.")
+		if settings.Mode == modeBalance {
+			fmt.Fprintln(out, "Для VPN-маршрутов используйте balancerTag proxy в правилах Xray.")
+		} else {
+			fmt.Fprintln(out, "Файл серверов готов. Примените его вручную через XKeen.")
+		}
+		fmt.Fprintln(out, "Чтобы поменять ссылку или режим, запустите "+watcherPath+" setup")
 	} else if configChanged {
 		fmt.Fprintln(out, "Подписка обновлена.")
+	}
+	if restart {
+		fmt.Fprintln(out, "XKeen перезапущен.")
 	}
 	return nil
 }
@@ -270,7 +268,7 @@ func writeCrontab(data []byte) error {
 	return nil
 }
 
-func (p managedPaths) backupSetup(files []routerChange, cron []byte) (string, error) {
+func (p managedPaths) backupSetup(settings routerFile, cron []byte) (string, error) {
 	root := filepath.Join(p.stateDir, "backups")
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return "", err
@@ -279,11 +277,9 @@ func (p managedPaths) backupSetup(files []routerChange, cron []byte) (string, er
 	if err != nil {
 		return "", err
 	}
-	for _, change := range files {
-		if change.before.exists {
-			if err := os.WriteFile(filepath.Join(dir, filepath.Base(change.before.path)), change.before.data, 0600); err != nil {
-				return "", err
-			}
+	if settings.exists {
+		if err := os.WriteFile(filepath.Join(dir, managedStateName), settings.data, 0600); err != nil {
+			return "", err
 		}
 	}
 	return dir, os.WriteFile(filepath.Join(dir, "crontab"), cron, 0600)

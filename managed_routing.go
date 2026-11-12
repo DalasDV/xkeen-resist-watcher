@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
+	"time"
 )
 
 type jsonObject = map[string]any
@@ -34,157 +37,104 @@ func encodeXrayObject(value any) ([]byte, error) {
 func configureManagedRouting(document, current jsonObject, profile managedProfile) error {
 	routing, _ := document["routing"].(map[string]any)
 	if routing == nil {
-		return fmt.Errorf("в 05_routing.json не найден раздел routing")
+		routing = jsonObject{}
+		document["routing"] = routing
 	}
 	rules, _ := routing["rules"].([]any)
-	target, err := existingVPNTarget(rules, current)
-	if err != nil {
-		return err
+	var updatedRules []any
+	if profile.backup.Tag != "" {
+		updatedRules = append(updatedRules, jsonObject{
+			"type":        "field",
+			"inboundTag":  []string{managedFallbackIn},
+			"balancerTag": managedBackup,
+		})
 	}
 
-	fallback := jsonObject{
-		"type":        "field",
-		"inboundTag":  []string{managedFallbackIn},
-		"balancerTag": managedBackup,
-	}
-	var updatedRules []any
-	previouslyManagedBackup := false
-	if profile.backup.Tag != "" {
-		updatedRules = append(updatedRules, fallback)
-	}
+	referenced := make(map[string]bool)
 	for _, entry := range rules {
 		rule, ok := entry.(map[string]any)
 		if !ok {
-			return fmt.Errorf("некорректное правило в 05_routing.json")
+			return fmt.Errorf("некорректное правило Xray")
 		}
 		tags := jsonStrings(rule["inboundTag"])
 		if rule["balancerTag"] == managedBackup && len(tags) == 1 &&
 			(tags[0] == managedFallbackIn || tags[0] == "resist-xhttp-fallback") {
-			previouslyManagedBackup = true
 			continue
 		}
-		if rule["outboundTag"] == target {
-			delete(rule, "outboundTag")
-			rule["balancerTag"] = managedPrimary
-		}
-		if rule["balancerTag"] == target {
-			rule["balancerTag"] = managedPrimary
+		if tag, ok := rule["balancerTag"].(string); ok {
+			referenced[tag] = true
 		}
 		updatedRules = append(updatedRules, rule)
 	}
-	routing["rules"] = updatedRules
+	if len(updatedRules) > 0 {
+		routing["rules"] = updatedRules
+	} else {
+		delete(routing, "rules")
+	}
 
-	balancers, _ := routing["balancers"].([]any)
-	updatedBalancers := []any{profile.primary}
+	balancers := []any{profile.primary}
 	if profile.backup.Tag != "" {
-		updatedBalancers = append(updatedBalancers, profile.backup)
+		balancers = append(balancers, profile.backup)
 	}
-	for _, entry := range balancers {
-		balancer, _ := entry.(map[string]any)
-		switch balancer["tag"] {
-		case managedPrimary:
+	oldBalancers, _ := routing["balancers"].([]any)
+	for _, entry := range oldBalancers {
+		old, _ := entry.(map[string]any)
+		tag, _ := old["tag"].(string)
+		if !referenced[tag] || tag == managedPrimary || tag == profile.backup.Tag {
 			continue
-		case managedBackup:
-			if previouslyManagedBackup {
-				continue
-			}
-			if profile.backup.Tag != "" {
-				return fmt.Errorf("тег %q занят другим балансировщиком", managedBackup)
-			}
 		}
-		updatedBalancers = append(updatedBalancers, entry)
+		alias := profile.primary
+		alias.Tag = tag
+		balancers = append(balancers, alias)
+		delete(referenced, tag)
 	}
-	routing["balancers"] = updatedBalancers
+	routing["balancers"] = balancers
 
-	observatory, _ := document["burstObservatory"].(map[string]any)
-	if observatory == nil {
-		observatory, _ = document["observatory"].(map[string]any)
+	ping := jsonObject{
+		"destination": "https://connectivitycheck.gstatic.com/generate_204",
+		"interval":    "20s",
+		"sampling":    1,
+		"timeout":     "5s",
 	}
-	if observatory == nil {
-		if current["observatory"] != nil || current["burstObservatory"] != nil {
-			return fmt.Errorf("наблюдение Xray настроено в другом файле. Мастер использует 05_routing.json")
-		}
-		observatory = jsonObject{}
-		if len(profile.burstObservatory) != 0 {
-			upstream, err := decodeXrayObject(profile.burstObservatory)
-			if err != nil {
-				return fmt.Errorf("некорректные параметры наблюдения в профиле")
-			}
-			if pingConfig, ok := upstream["pingConfig"]; ok {
-				observatory["pingConfig"] = pingConfig
-			}
-		}
-		document["burstObservatory"] = observatory
-	}
-	if burst, ok := document["burstObservatory"].(map[string]any); ok && burst["pingConfig"] == nil {
-		burst["pingConfig"] = jsonObject{
-			"destination": "https://connectivitycheck.gstatic.com/generate_204",
-			"interval":    "20s",
-			"sampling":    1,
-			"timeout":     "5s",
-		}
-	}
-	selectors := append(slices.Clone(profile.primary.Selector), profile.backup.Selector...)
-	for _, selector := range jsonStrings(observatory["subjectSelector"]) {
-		if selector != "resist" && selector != "resist--hy2" && selector != "resist--xhttp" &&
-			selector != managedHysteria && selector != managedXHTTP && selector != managedOther &&
-			!slices.Contains(selectors, selector) {
-			selectors = append(selectors, selector)
-		}
-	}
-	observatory["subjectSelector"] = selectors
-	return nil
-}
-
-func existingVPNTarget(rules []any, config jsonObject) (string, error) {
-	for _, entry := range rules {
-		rule, _ := entry.(map[string]any)
-		if rule["outboundTag"] == managedPrimary || rule["balancerTag"] == managedPrimary {
-			return managedPrimary, nil
-		}
-	}
-
-	outbounds, _ := config["outbounds"].([]any)
-	fullRouting, _ := config["routing"].(map[string]any)
-	balancers, _ := fullRouting["balancers"].([]any)
-	var targets []string
-	for _, entry := range rules {
-		rule, _ := entry.(map[string]any)
-		if tag, _ := rule["balancerTag"].(string); tag != "" && tag != managedBackup && !slices.Contains(targets, tag) {
-			for _, entry := range balancers {
-				balancer, _ := entry.(map[string]any)
-				if balancer["tag"] == tag {
-					targets = append(targets, tag)
-					break
+	if burst, ok := current["burstObservatory"].(map[string]any); ok {
+		if existing, ok := burst["pingConfig"].(map[string]any); ok {
+			ping = maps.Clone(existing)
+			for _, field := range []string{"interval", "timeout"} {
+				if duration := xrayDuration(ping[field]); duration != "" {
+					ping[field] = duration
 				}
 			}
 		}
-		tag, _ := rule["outboundTag"].(string)
-		if tag == "" || slices.Contains(targets, tag) {
-			continue
+	} else if observatory, ok := current["observatory"].(map[string]any); ok {
+		if destination, ok := observatory["probeURL"].(string); ok && destination != "" {
+			ping["destination"] = destination
 		}
-		if tag == "vless-reality" {
-			// The default XKeen routing template can reference this tag before
-			// a real proxy outbound has been configured.
-			targets = append(targets, tag)
-			continue
-		}
-		for _, entry := range outbounds {
-			outbound, _ := entry.(map[string]any)
-			if outbound["tag"] != tag {
-				continue
-			}
-			switch outbound["protocol"] {
-			case "vless", "vmess", "trojan", "shadowsocks", "hysteria", "wireguard", "masque":
-				targets = append(targets, tag)
-			}
-			break
+		if interval := xrayDuration(observatory["probeInterval"]); interval != "" {
+			ping["interval"] = interval
 		}
 	}
-	if len(targets) == 1 {
-		return targets[0], nil
+	delete(document, "observatory")
+	document["burstObservatory"] = jsonObject{
+		"subjectSelector": append(slices.Clone(profile.primary.Selector), profile.backup.Selector...),
+		"pingConfig":      ping,
 	}
-	return "", fmt.Errorf("в 05_routing.json не удалось определить один существующий VPN-маршрут для подключения балансировщика")
+	return nil
+}
+
+func xrayDuration(value any) string {
+	switch duration := value.(type) {
+	case string:
+		return duration
+	case json.Number:
+		// Xray -dump may represent durations as nanoseconds, including scientific notation.
+		if nanos, err := duration.Int64(); err == nil {
+			return time.Duration(nanos).String()
+		}
+		if nanos, err := duration.Float64(); err == nil && nanos >= 0 && nanos < 1<<63 {
+			return time.Duration(nanos).String()
+		}
+	}
+	return ""
 }
 
 func jsonStrings(value any) []string {
@@ -198,59 +148,123 @@ func jsonStrings(value any) []string {
 	return strings
 }
 
-func (p managedPaths) prepareXrayChanges(profile managedProfile, tag string) ([]routerChange, error) {
-	path := filepath.Join(p.configDir, "05_routing.json")
-	routing, err := readRouterFile(path)
+type xrayConfigFile struct {
+	original routerFile
+	document jsonObject
+}
+
+func isXrayConfig(name string) bool {
+	switch filepath.Ext(name) {
+	case ".json", ".jsonc", ".yaml", ".yml", ".toml":
+		return true
+	}
+	return false
+}
+
+func (p managedPaths) loadXrayConfigs() ([]xrayConfigFile, int, error) {
+	entries, err := os.ReadDir(p.configDir)
 	if err != nil {
-		return nil, err
+		return nil, -1, err
 	}
-	if !routing.exists {
-		return nil, fmt.Errorf("на роутере не найден %s", path)
+	var files []xrayConfigFile
+	activeRouting, defaultRouting := -1, -1
+	for _, entry := range entries {
+		if entry.IsDir() || !isXrayConfig(entry.Name()) {
+			continue
+		}
+		file, err := readRouterFile(filepath.Join(p.configDir, entry.Name()))
+		if err != nil {
+			return nil, -1, err
+		}
+		document, err := decodeXrayObject(file.data)
+		if !json.Valid(file.data) {
+			document, err = p.dumpXray("-c", file.path)
+		}
+		if err != nil || document == nil {
+			return nil, -1, fmt.Errorf("не удалось разобрать конфигурацию Xray в %s", file.path)
+		}
+		if entry.Name() == "05_routing.json" {
+			defaultRouting = len(files)
+		}
+		if document["routing"] != nil {
+			activeRouting = len(files)
+		}
+		files = append(files, xrayConfigFile{original: file, document: document})
 	}
+	if activeRouting == -1 {
+		activeRouting = defaultRouting
+		if activeRouting == -1 {
+			activeRouting = len(files)
+			files = append(files, xrayConfigFile{
+				original: routerFile{path: filepath.Join(p.configDir, "05_routing.json")},
+				document: jsonObject{},
+			})
+		}
+	}
+	return files, activeRouting, nil
+}
+
+func (p managedPaths) prepareXrayChanges(profile managedProfile, tag string, balance bool) ([]routerChange, error) {
 	outbounds, err := readRouterFile(filepath.Join(p.configDir, "04_outbounds."+tag+".json"))
 	if err != nil {
 		return nil, err
+	}
+	if !balance {
+		nodes := slices.DeleteFunc(slices.Clone(profile.outbounds), func(node jsonObject) bool {
+			return node["protocol"] == "loopback"
+		})
+		return appendXrayChange(nil, outbounds, jsonObject{"outbounds": nodes})
 	}
 
 	current, err := p.dumpXray("-confdir", p.configDir)
 	if err != nil {
 		return nil, err
 	}
-	var document jsonObject
-	if json.Valid(routing.data) {
-		document, err = decodeXrayObject(routing.data)
-	} else {
-		document, err = p.dumpXray("-c", path)
-	}
+	files, activeRouting, err := p.loadXrayConfigs()
 	if err != nil {
 		return nil, err
 	}
-	if err := configureManagedRouting(document, current, profile); err != nil {
-		return nil, err
-	}
-	proxies, err := managedOutbounds(current, outbounds, profile)
-	if err != nil {
-		return nil, err
-	}
-	generated, err := encodeXrayObject(jsonObject{"outbounds": proxies})
-	if err != nil {
-		return nil, err
-	}
-	route, err := encodeXrayObject(document)
-	if err != nil {
-		return nil, err
-	}
-
-	var changes []routerChange
-	if !bytes.Equal(outbounds.data, generated) {
-		mode := os.FileMode(0644)
-		if outbounds.exists {
-			mode = outbounds.mode
+	var previousOutbounds []jsonObject
+	if outbounds.exists {
+		previous, err := decodeXrayObject(outbounds.data)
+		if err != nil {
+			return nil, fmt.Errorf("не удалось прочитать текущий файл выходов watcher")
 		}
-		changes = append(changes, routerChange{before: outbounds, data: generated, mode: mode})
+		previousOutbounds = outboundsFrom(previous)
 	}
-	if !bytes.Equal(routing.data, route) {
-		changes = append(changes, routerChange{before: routing, data: route, mode: routing.mode})
+	proxies, err := managedOutbounds(current, previousOutbounds, profile)
+	if err != nil {
+		return nil, err
+	}
+	changes, err := appendXrayChange(nil, outbounds, jsonObject{"outbounds": proxies})
+	if err != nil {
+		return nil, err
+	}
+	for i, file := range files {
+		document := file.document
+		if i == activeRouting {
+			if err := configureManagedRouting(document, current, profile); err != nil {
+				return nil, err
+			}
+			if err := migrateOutboundRules(document, previousOutbounds, proxies); err != nil {
+				return nil, fmt.Errorf("%s: %w", file.original.path, err)
+			}
+		} else {
+			routing, _ := document["routing"].(map[string]any)
+			_, hasBalancers := routing["balancers"]
+			_, hasObservatory := document["observatory"]
+			_, hasBurst := document["burstObservatory"]
+			if !hasBalancers && !hasObservatory && !hasBurst {
+				continue
+			}
+			delete(routing, "balancers")
+			delete(document, "observatory")
+			delete(document, "burstObservatory")
+		}
+		changes, err = appendXrayChange(changes, file.original, document)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if len(changes) > 0 {
 		if err := p.testXrayChanges(changes); err != nil {
@@ -258,6 +272,24 @@ func (p managedPaths) prepareXrayChanges(profile managedProfile, tag string) ([]
 		}
 	}
 	return changes, nil
+}
+
+func appendXrayChange(changes []routerChange, file routerFile, document jsonObject) ([]routerChange, error) {
+	generated, err := encodeXrayObject(document)
+	if err != nil {
+		return nil, err
+	}
+	if bytes.Equal(file.data, generated) {
+		return changes, nil
+	}
+	if filepath.Ext(file.path) == ".toml" {
+		return nil, fmt.Errorf("перенесите настройки балансировки и мониторинга из %s в JSON перед автоматической настройкой", file.path)
+	}
+	mode := os.FileMode(0600)
+	if file.exists {
+		mode = file.mode
+	}
+	return append(changes, routerChange{before: file, data: generated, mode: mode}), nil
 }
 
 func (p managedPaths) xrayCommand(args ...string) *exec.Cmd {
@@ -284,18 +316,51 @@ func (p managedPaths) dumpXray(args ...string) (jsonObject, error) {
 	return document, nil
 }
 
-func managedOutbounds(current jsonObject, old routerFile, profile managedProfile) ([]map[string]any, error) {
+func migrateOutboundRules(document jsonObject, previous, updated []jsonObject) error {
+	oldByTag := make(map[string]jsonObject)
+	newByTag := make(map[string]bool)
+	for _, outbound := range previous {
+		tag, _ := outbound["tag"].(string)
+		oldByTag[tag] = outbound
+	}
+	for _, outbound := range updated {
+		tag, _ := outbound["tag"].(string)
+		newByTag[tag] = true
+	}
+
+	routing, _ := document["routing"].(map[string]any)
+	rules, _ := routing["rules"].([]any)
+	for _, entry := range rules {
+		rule, _ := entry.(map[string]any)
+		tag, _ := rule["outboundTag"].(string)
+		old := oldByTag[tag]
+		if tag == "" || old == nil || newByTag[tag] {
+			continue
+		}
+
+		oldConfig := maps.Clone(old)
+		delete(oldConfig, "tag")
+		var matches []string
+		for _, outbound := range updated {
+			config := maps.Clone(outbound)
+			delete(config, "tag")
+			if reflect.DeepEqual(oldConfig, config) {
+				matches = append(matches, outbound["tag"].(string))
+			}
+		}
+		if len(matches) != 1 {
+			return fmt.Errorf("не удалось однозначно сопоставить выход %q с нодой подписки; проверьте outboundTag в правиле Xray", tag)
+		}
+		rule["outboundTag"] = matches[0]
+	}
+	return nil
+}
+
+func managedOutbounds(current jsonObject, previous []jsonObject, profile managedProfile) ([]map[string]any, error) {
 	owned := make(map[string]bool)
-	if old.exists {
-		// The old watcher file is also generated JSON, even when other XKeen files use JSONC.
-		previous, err := decodeXrayObject(old.data)
-		if err != nil {
-			return nil, fmt.Errorf("не удалось прочитать текущий файл выходов watcher")
-		}
-		for _, egress := range outboundsFrom(previous) {
-			tag, _ := egress["tag"].(string)
-			owned[tag] = true
-		}
+	for _, egress := range previous {
+		tag, _ := egress["tag"].(string)
+		owned[tag] = true
 	}
 	selectors := append(slices.Clone(profile.primary.Selector), profile.backup.Selector...)
 	var direct bool
@@ -345,9 +410,7 @@ func (p managedPaths) testXrayChanges(changes []routerChange) error {
 		return err
 	}
 	for _, entry := range entries {
-		switch filepath.Ext(entry.Name()) {
-		case ".json", ".jsonc", ".yaml", ".yml", ".toml":
-		default:
+		if entry.IsDir() || !isXrayConfig(entry.Name()) {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(p.configDir, entry.Name()))

@@ -4,10 +4,8 @@ umask 077
 
 REPO=DalasDV/xkeen-resist-watcher
 RELEASE_URL="https://github.com/$REPO/releases/latest/download"
-API_URL="https://api.github.com/repos/$REPO"
 INSTALL_DIR=/opt/sbin
 WATCHER="$INSTALL_DIR/xkeen-subscription-watcher"
-CONFIG_DIR=/opt/etc/xray/configs
 BACKUP_ROOT=/opt/etc/xkeen-subscription-watcher/backups
 
 fail() {
@@ -33,34 +31,11 @@ detect_arch() {
     esac
 }
 
-github_api() {
-    printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" |
-        curl -fsSL --retry 2 --config - -H 'X-GitHub-Api-Version: 2022-11-28' "$@"
-}
-
-download_private_asset() {
-    asset_name=$1
-    asset_id=$(jq -er --arg name "$asset_name" '.assets[] | select(.name == $name) | .id' "$STAGE/release.json") ||
-        fail "В релизе отсутствует $asset_name."
-    case "$asset_id" in
-        ''|*[!0-9]*) fail "Некорректный идентификатор файла $asset_name." ;;
-    esac
-    github_api -H 'Accept: application/octet-stream' "$API_URL/releases/assets/$asset_id" -o "$STAGE/$asset_name"
-}
-
 cleanup() {
-    if [ -n "$TTY_SETTINGS" ]; then
-        stty "$TTY_SETTINGS" </dev/tty || :
-    fi
     rm -rf "$STAGE"
 }
 
-case "${1:-}" in
-    '') PRIVATE=0 ;;
-    --private) PRIVATE=1 ;;
-    *) fail "Использование: sh install.sh [--private]" ;;
-esac
-[ "$#" -le 1 ] || fail "Использование: sh install.sh [--private]"
+[ "$#" -eq 0 ] || fail "Использование: sh install.sh"
 
 for command_name in curl sha256sum awk mktemp; do
     command -v "$command_name" >/dev/null 2>&1 || fail "На роутере нужна команда $command_name."
@@ -78,34 +53,12 @@ fi
 echo "Архитектура: $ARCH."
 
 STAGE=$(mktemp -d "$INSTALL_DIR/.xkeen-watcher.XXXXXX")
-TTY_SETTINGS=''
 trap cleanup 0
 trap 'exit 1' HUP INT TERM
-if [ "$PRIVATE" -eq 1 ]; then
-    command -v jq >/dev/null 2>&1 || fail 'Для приватного релиза нужна команда jq.'
-    TOKEN=${XKEEN_GITHUB_TOKEN:-}
-    unset XKEEN_GITHUB_TOKEN
-    if [ -z "$TOKEN" ]; then
-        TTY_SETTINGS=$(stty -g </dev/tty) || fail 'Запустите установщик в терминале или передайте XKEEN_GITHUB_TOKEN.'
-        printf 'GitHub token с доступом Contents: Read: ' >/dev/tty
-        stty -echo </dev/tty
-        IFS= read -r TOKEN </dev/tty || fail 'Не удалось прочитать токен.'
-        stty "$TTY_SETTINGS" </dev/tty
-        TTY_SETTINGS=''
-        printf '\n' >/dev/tty
-    fi
-    case "$TOKEN" in
-        ''|*[!a-zA-Z0-9_-]*) fail 'Некорректный формат GitHub token.' ;;
-    esac
-    github_api -H 'Accept: application/vnd.github+json' "$API_URL/releases/latest" -o "$STAGE/release.json"
-    download_private_asset SHA256SUMS
-    download_private_asset "$ASSET"
-    unset TOKEN
-else
-    curl -fsSL --retry 2 "$RELEASE_URL/SHA256SUMS" -o "$STAGE/SHA256SUMS" ||
-        fail 'Не удалось скачать релиз. Для приватного репозитория запустите sh install.sh --private.'
-    curl -fsSL --retry 2 "$RELEASE_URL/$ASSET" -o "$STAGE/$ASSET"
-fi
+curl -fsSL --retry 2 "$RELEASE_URL/SHA256SUMS" -o "$STAGE/SHA256SUMS" ||
+    fail 'Не удалось скачать контрольные суммы из последнего публичного релиза.'
+curl -fsSL --retry 2 "$RELEASE_URL/$ASSET" -o "$STAGE/$ASSET" ||
+    fail "Не удалось скачать сборку $ASSET."
 
 EXPECTED=$(awk -v name="$ASSET" '$2 == name { print $1 }' "$STAGE/SHA256SUMS")
 ACTUAL=$(sha256sum "$STAGE/$ASSET")
@@ -120,11 +73,6 @@ set --
 if [ -e "$WATCHER" ] || [ -L "$WATCHER" ]; then
     set -- "$@" "$WATCHER"
 fi
-for config_file in "$CONFIG_DIR"/04_outbounds.json "$CONFIG_DIR"/04_outbounds.*.json "$CONFIG_DIR"/05_routing.json; do
-    if [ -f "$config_file" ]; then
-        set -- "$@" "$config_file"
-    fi
-done
 if command -v crontab >/dev/null 2>&1 && crontab -l >"$STAGE/crontab" 2>/dev/null &&
    awk '/^[[:space:]]*#/ {next} /xkeen-subscription-watcher/ {found=1} END {exit !found}' "$STAGE/crontab"; then
     set -- "$@" "$STAGE/crontab"

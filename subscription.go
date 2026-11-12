@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -10,16 +11,24 @@ import (
 	"net/url"
 	"strings"
 	"time"
-	"unicode"
 )
 
 const subscriptionUserAgent = "XKeen-Subscription-Watcher"
 
+var (
+	errHWIDRequired = errors.New("сервер подписки требует HWID, но не принял идентификатор устройства")
+	errHWIDLimit    = errors.New("в подписке достигнут лимит устройств")
+)
+
 func fetchSubscription(sub subscription) (string, error) {
-	body, err := doHTTPRequest(sub.url, false)
+	hwid := routerHWID()
+	body, err := doHTTPRequest(sub.url, hwid, false)
+	if errors.Is(err, errHWIDRequired) || errors.Is(err, errHWIDLimit) {
+		return "", err
+	}
 	if err != nil {
 		log.Printf("Не удалось получить подписку %q без прокси, пробуем с прокси: %v", sub.tag, err)
-		body, err = doHTTPRequest(sub.url, true)
+		body, err = doHTTPRequest(sub.url, hwid, true)
 		if err != nil {
 			return "", err
 		}
@@ -28,7 +37,7 @@ func fetchSubscription(sub subscription) (string, error) {
 	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(body), "\uFEFF")), nil
 }
 
-func doHTTPRequest(requestURL string, withProxy bool) (string, error) {
+func doHTTPRequest(requestURL, hwid string, withProxy bool) (string, error) {
 	var transport *http.Transport
 	if withProxy {
 		proxyURL, _ := url.Parse("http://127.0.0.1:8080")
@@ -47,11 +56,21 @@ func doHTTPRequest(requestURL string, withProxy bool) (string, error) {
 		return "", fmt.Errorf("неверный URL подписки")
 	}
 	req.Header.Set("User-Agent", subscriptionUserAgent)
+	if hwid != "" {
+		req.Header.Set("X-Hwid", hwid)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("не удалось выполнить HTTP-запрос подписки")
 	}
 	defer resp.Body.Close()
+	if strings.EqualFold(resp.Header.Get("X-Hwid-Max-Devices-Reached"), "true") ||
+		strings.EqualFold(resp.Header.Get("X-Hwid-Limit"), "true") {
+		return "", errHWIDLimit
+	}
+	if strings.EqualFold(resp.Header.Get("X-Hwid-Not-Supported"), "true") {
+		return "", errHWIDRequired
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
@@ -70,10 +89,9 @@ type subscriptionOutbound struct {
 }
 
 type xrayProfile struct {
-	Remarks          string           `json:"remarks"`
-	Outbounds        []map[string]any `json:"outbounds"`
-	Routing          json.RawMessage  `json:"routing"`
-	BurstObservatory json.RawMessage  `json:"burstObservatory"`
+	Remarks   string           `json:"remarks"`
+	Outbounds []map[string]any `json:"outbounds"`
+	Routing   json.RawMessage  `json:"routing"`
 }
 
 func decodeXrayProfiles(body string) ([]xrayProfile, error) {
@@ -102,7 +120,18 @@ func parseXraySubscription(body string) ([]subscriptionOutbound, error) {
 	}
 	var result []subscriptionOutbound
 	for _, profile := range profiles {
-		remarks := sanitizeProxyName(profile.Remarks)
+		var routing struct {
+			Balancers []json.RawMessage `json:"balancers"`
+		}
+		if len(profile.Routing) > 0 {
+			if err := json.Unmarshal(profile.Routing, &routing); err != nil {
+				return nil, fmt.Errorf("некорректный routing в профиле Xray JSON")
+			}
+		}
+		if len(routing.Balancers) > 0 {
+			continue
+		}
+		remarks := strings.TrimSpace(profile.Remarks)
 		imported := 0
 		for _, outbound := range profile.Outbounds {
 			protocol, ok := outbound["protocol"].(string)
@@ -121,9 +150,9 @@ func parseXraySubscription(body string) ([]subscriptionOutbound, error) {
 			name := remarks
 			tag, _ := outbound["tag"].(string)
 			if name == "" {
-				name = sanitizeProxyName(tag)
+				name = strings.TrimSpace(tag)
 			} else if imported > 0 && tag != "" {
-				name += "--" + sanitizeProxyName(tag)
+				name += "--" + strings.TrimSpace(tag)
 			}
 			result = append(result, subscriptionOutbound{name: name, config: outbound})
 			imported++
@@ -168,15 +197,5 @@ func getProxyName(rawURL string) string {
 	if err != nil {
 		name = strings.TrimSpace(rawURL[idx+1:])
 	}
-	return sanitizeProxyName(name)
-}
-
-func sanitizeProxyName(name string) string {
-	var b strings.Builder
-	for _, c := range name {
-		if unicode.IsLetter(c) || unicode.IsDigit(c) || c == ' ' || c == '-' || c == '_' {
-			b.WriteRune(c)
-		}
-	}
-	return strings.TrimSpace(b.String())
+	return strings.TrimSpace(name)
 }

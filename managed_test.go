@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -29,40 +30,89 @@ const managedFeed = `[
 	                 {"tag":"tcp","selector":["tcp-"],"strategy":{"type":"leastPing"},"fallbackTag":"direct"}]},
 	  "burstObservatory":{"subjectSelector":["udp-","tcp-"],"pingConfig":{"interval":"20s","sampling":1,"timeout":"5s","destination":"https://example.com/probe"}}
 	},
-	{"remarks":"Individual","outbounds":[{"tag":"proxy","protocol":"hysteria","settings":{"version":2,"address":"192.0.2.10","port":443}}]}
+	{"remarks":"🇯🇵 Япония - Игровой","outbounds":[{"tag":"udp-east","protocol":"hysteria","settings":{"version":2,"address":"192.0.2.10","port":443},"streamSettings":{"network":"hysteria","security":"tls","tlsSettings":{"serverName":"example.com","verifyPeerCertByName":"origin.example"},"hysteriaSettings":{"version":2,"auth":"test"},"finalmask":{"quicParams":{"congestion":"bbr","keepAlivePeriod":20}}}}]},
+	{"remarks":"Нидерланды 1","outbounds":[{"tag":"tcp-first","protocol":"vless","settings":{"vnext":[{"address":"192.0.2.12","port":443,"users":[{"id":"00000000-0000-4000-8000-000000000001","encryption":"none"}]}]},"streamSettings":{"network":"xhttp","xhttpSettings":{"path":"/test"}}}]}
 ]`
 
-func TestSelectManagedProfile(t *testing.T) {
-	profile, name, err := selectManagedProfile(managedFeed, "", bufio.NewReader(strings.NewReader("")), io.Discard)
+func TestManagedSubscriptionImportsNamedNodes(t *testing.T) {
+	profile, err := compileManagedSubscription(managedFeed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if name != "Example Auto" || len(profile.outbounds) != 4 {
-		t.Fatalf("wrong profile %q, %d outbounds", name, len(profile.outbounds))
+	if len(profile.outbounds) != 3 {
+		t.Fatalf("expected two individual nodes and local loopback, got %d outbounds", len(profile.outbounds))
 	}
 	assertDeepEqual(t, profile.primary.Selector, []string{"hy2-"})
 	assertDeepEqual(t, profile.backup.Selector, []string{"xhttp-"})
-	for i, tag := range []string{"hy2-1", "hy2-2", "xhttp-1", managedLoopback} {
+	for i, tag := range []string{"hy2-🇯🇵 Япония - Игровой", "xhttp-Нидерланды 1", managedLoopback} {
 		assertDeepEqual(t, profile.outbounds[i]["tag"], tag)
 	}
 	stream := profile.outbounds[0]["streamSettings"].(map[string]any)
 	if stream["finalmask"] == nil || stream["tlsSettings"].(map[string]any)["verifyPeerCertByName"] != "origin.example" {
 		t.Fatal("transport or TLS settings lost")
 	}
-	if _, _, err := selectManagedProfile(managedFeed, "renamed", nil, io.Discard); err == nil {
-		t.Fatal("refresh silently changed the selected profile")
+	profiles, err := decodeXrayProfiles(managedFeed)
+	if err != nil {
+		t.Fatal(err)
 	}
+	balancerOnly, err := json.Marshal(profiles[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compileManagedSubscription(string(balancerOnly)); err == nil {
+		t.Fatal("a subscription with only an upstream balancer must fail")
+	}
+}
+
+func TestNamedOutboundsSurviveReordering(t *testing.T) {
+	entries, err := parseXraySubscription(managedFeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries = append(entries, subscriptionOutbound{
+		name:   entries[0].name,
+		config: map[string]any{"protocol": "hysteria", "settings": map[string]any{"address": "192.0.2.20"}},
+	})
+	first, err := ordinaryManagedProfile(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Reverse(entries)
+	second, err := ordinaryManagedProfile(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDeepEqual(t, first.outbounds, second.outbounds)
+}
+
+func TestMigrateOutboundRules(t *testing.T) {
+	profile, err := compileManagedSubscription(managedFeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := jsonObject{"outboundTag": "hy2-5"}
+	doc := jsonObject{"routing": jsonObject{"rules": []any{rule}}}
+	old := configureOutbound(profile.outbounds[0], "hy2-5", "", "")
+	if err := migrateOutboundRules(doc, []jsonObject{old}, profile.outbounds); err != nil {
+		t.Fatal(err)
+	}
+	assertDeepEqual(t, rule["outboundTag"], "hy2-🇯🇵 Япония - Игровой")
+
+	rule["outboundTag"] = "hy2-5"
+	if err := migrateOutboundRules(doc, []jsonObject{old}, profile.outbounds[1:]); err == nil {
+		t.Fatal("expected error for a missing replacement")
+	}
+	assertDeepEqual(t, rule["outboundTag"], "hy2-5")
 }
 
 func TestSetupForOrdinarySubscription(t *testing.T) {
 	body := "hy2://test@hy.example.com#Hysteria\nvless://00000000-0000-4000-8000-000000000001@x.example.com?type=xhttp#XHTTP"
-	profile, name, err := selectManagedProfile(body, "", bufio.NewReader(strings.NewReader("")), io.Discard)
+	profile, err := compileManagedSubscription(body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertDeepEqual(t, name, "")
-	assertDeepEqual(t, profile.primary.Selector, []string{"hy2-", "xhttp-"})
-	assertDeepEqual(t, profile.backup.Tag, "")
+	assertDeepEqual(t, profile.primary.Selector, []string{"hy2-"})
+	assertDeepEqual(t, profile.backup.Selector, []string{"xhttp-"})
 	routing, err := decodeXrayObject([]byte(`{"routing":{"rules":[{"type":"field","balancerTag":"proxy","network":"tcp,udp"}]}}`))
 	if err != nil {
 		t.Fatal(err)
@@ -142,10 +192,18 @@ if [ -e "$TEST_FAIL" ]; then rm "$TEST_FAIL"; exit 1; fi
 		// XKeen policies
 		"routing":{"domainStrategy":"AsIs","rules":[
 			{"type":"field","domain":["domain:local.example"],"outboundTag":"direct"},
-			{"type":"field","network":"tcp,udp","outboundTag":"existing-node"}
+			{"type":"field","network":"tcp,udp","balancerTag":"old-vpn"}
+		],"balancers":[
+			{"tag":"old-vpn","selector":["existing-node"],"strategy":{"type":"random"}},
+			{"tag":"unused-old","selector":["existing-node"],"strategy":{"type":"random"}}
 		]}
 	}`
 	write(routePath, initialRoute, 0600)
+	const legacyObservatory = `{"observatory":{"subjectSelector":["existing-node"],"probeURL":"http://legacy.example.com/204","probeInterval":"30s"}}`
+	observerPath := filepath.Join(paths.configDir, "07_observatory.json")
+	write(observerPath, legacyObservatory, 0600)
+	write(filepath.Join(paths.configDir, "03_inbounds.json"), `{"inbounds":[]}`, 0600)
+	write(filepath.Join(paths.configDir, "config-notes.txt"), "backup me", 0600)
 
 	var response atomic.Value
 	response.Store(managedFeed)
@@ -154,10 +212,10 @@ if [ -e "$TEST_FAIL" ]; then rm "$TEST_FAIL"; exit 1; fi
 	}))
 	defer server.Close()
 	var messages bytes.Buffer
-	if err := paths.update(server.URL, bufio.NewReader(strings.NewReader("")), &messages); err != nil {
+	if err := paths.update(server.URL, modeBalance, &messages); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(messages.String(), "setup") || strings.Contains(messages.String(), server.URL) {
+	if !strings.Contains(messages.String(), "setup") || !strings.Contains(messages.String(), "XKeen перезапущен.") || strings.Contains(messages.String(), server.URL) {
 		t.Fatal("setup instructions missing or URL was shown")
 	}
 	state := filepath.Join(paths.stateDir, managedStateName)
@@ -165,36 +223,101 @@ if [ -e "$TEST_FAIL" ]; then rm "$TEST_FAIL"; exit 1; fi
 		t.Fatalf("private file was not saved: %v", err)
 	}
 	var saved managedSubscription
-	if err := json.Unmarshal(read(state), &saved); err != nil || saved.Profile != "Example Auto" || saved.Tag != "watcher" {
+	if err := json.Unmarshal(read(state), &saved); err != nil || saved.Tag != "watcher" || saved.Mode != modeBalance {
 		t.Fatalf("setup did not save the profile: %v", err)
 	}
 	if string(read(cron)) != "0 * * * * "+watcherPath+" refresh\n" {
 		t.Fatal("unexpected cron entry")
 	}
 	initialOutput := read(filepath.Join(paths.configDir, "04_outbounds.watcher.json"))
-	if bytes.Count(initialOutput, []byte(`"tag":`)) != 4 {
-		t.Fatal("expected two Hysteria, one XHTTP and loopback")
+	if bytes.Count(initialOutput, []byte(`"tag":`)) != 3 {
+		t.Fatal("expected one Hysteria, one XHTTP and loopback")
 	}
-	if got := string(read(routePath)); !strings.Contains(got, "local.example") || !strings.Contains(got, managedFallbackIn) ||
-		!strings.Contains(got, "https://example.com/probe") || !strings.Contains(got, `"balancerTag": "proxy"`) {
-		t.Fatal("expected preserved policy and generated routing")
+	got := string(read(routePath))
+	for _, want := range []string{"local.example", managedFallbackIn, "http://legacy.example.com/204", `"balancerTag": "old-vpn"`, `"tag": "old-vpn"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("routing missing %q", want)
+		}
 	}
+	if strings.Contains(got, "unused-old") || strings.Contains(got, `"type": "random"`) ||
+		strings.Contains(string(read(observerPath)), `"observatory"`) {
+		t.Fatal("old balancers or observatory survived")
+	}
+	backupRoot := filepath.Join(paths.configDir, "watcher-backup")
+	snapshots, err := os.ReadDir(backupRoot)
+	if err != nil || len(snapshots) != 1 {
+		t.Fatalf("expected one snapshot: %v", err)
+	}
+	snapshot := filepath.Join(backupRoot, snapshots[0].Name())
+	assertDeepEqual(t, string(read(filepath.Join(snapshot, "05_routing.json"))), initialRoute)
+	assertDeepEqual(t, string(read(filepath.Join(snapshot, "07_observatory.json"))), legacyObservatory)
+	assertDeepEqual(t, string(read(filepath.Join(snapshot, "03_inbounds.json"))), `{"inbounds":[]}`)
+	assertDeepEqual(t, string(read(filepath.Join(snapshot, "config-notes.txt"))), "backup me")
 
-	if err := paths.update("", nil, io.Discard); err != nil {
+	if err := paths.update("", "", io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	assertDeepEqual(t, string(read(log)), "restart\n")
 	outputPath := filepath.Join(paths.configDir, "04_outbounds.watcher.json")
-	response.Store(strings.Replace(managedFeed, "192.0.2.11", "192.0.2.15", 1))
+	response.Store(strings.ReplaceAll(managedFeed, "192.0.2.10", "192.0.2.15"))
 	write(fail, "", 0600)
-	if err := paths.update("", nil, io.Discard); err == nil {
+	if err := paths.update("", "", io.Discard); err == nil {
 		t.Fatal("expected restart to fail")
 	}
 	assertDeepEqual(t, read(outputPath), initialOutput)
-	if err := paths.update("", nil, io.Discard); err != nil {
+	if err := paths.update("", "", io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(read(outputPath), []byte("192.0.2.15")) {
 		t.Fatal("new server was not applied")
+	}
+
+	const namedTag = "hy2-🇯🇵 Япония - Игровой"
+	write(outputPath, strings.Replace(string(read(outputPath)), namedTag, "hy2-5", 1), 0600)
+	routing := strings.Replace(string(read(routePath)), `"rules": [`, `"rules": [
+		{"type":"field","sourceIP":["192.168.1.99"],"outboundTag":"hy2-5"},`, 1)
+	routing = strings.Replace(routing, "http://legacy.example.com/204", "http://probe.example.com/204", 1)
+	write(routePath, routing, 0600)
+	write(state, strings.Replace(string(read(state)), "{", `{"profile":"Example Auto",`, 1), 0600)
+	if err := paths.update("", "", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	got = string(read(routePath))
+	if !strings.Contains(got, `"outboundTag": "`+namedTag+`"`) || !strings.Contains(got, "http://probe.example.com/204") {
+		t.Fatal("refresh did not migrate the fixed outbound or preserve the local probe")
+	}
+
+	restarts := read(log)
+	before := read(routePath)
+	messages.Reset()
+	if err := paths.update(server.URL, modeOutbounds, &messages); err != nil {
+		t.Fatal(err)
+	}
+	assertDeepEqual(t, read(routePath), before)
+	assertDeepEqual(t, read(log), restarts)
+	if strings.Contains(string(read(outputPath)), managedLoopback) || strings.Contains(messages.String(), "XKeen перезапущен.") {
+		t.Fatal("nodes-only mode generated a loopback or restarted XKeen")
+	}
+	snapshots, err = os.ReadDir(backupRoot)
+	if err != nil || len(snapshots) != 2 {
+		t.Fatalf("expected separate backups after rerunning setup: %v", err)
+	}
+	response.Store(strings.ReplaceAll(managedFeed, "192.0.2.10", "192.0.2.16"))
+	if err := paths.update("", "", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	assertDeepEqual(t, read(routePath), before)
+	assertDeepEqual(t, read(log), restarts)
+	if !bytes.Contains(read(outputPath), []byte("192.0.2.16")) {
+		t.Fatal("nodes-only refresh did not update nodes")
+	}
+}
+
+func TestSetupMode(t *testing.T) {
+	for input, want := range map[string]string{"1\n": modeBalance, "2\n": modeOutbounds, "\n": modeOutbounds, "wrong\n1\n": modeBalance} {
+		mode, err := readSetupMode(bufio.NewReader(strings.NewReader(input)), io.Discard)
+		if err != nil || mode != want {
+			t.Fatalf("input %q: got %q, %v; want %q", input, mode, err, want)
+		}
 	}
 }
