@@ -63,7 +63,20 @@ Base64 также поддерживается. Для `hysteria2://` и `hy2://
 резервной копии. Рабочие файлы выходов обновляет сам watcher при первом
 успешном чтении подписки.
 
-### Приватный репозиторий
+### Запуск на роутере
+
+В терминале Entware:
+
+```shell
+curl -fsSL https://github.com/DalasDV/xkeen-resist-watcher/releases/latest/download/install.sh \
+  -o /tmp/xkeen-resist-install.sh &&
+  sh /tmp/xkeen-resist-install.sh
+```
+
+После установки следуйте напечатанным шагам для приоритета Hysteria с
+резервом XHTTP. Ниже приведён также вариант для одного общего балансировщика.
+
+### Если репозиторий закрыт
 
 Скачайте `install.sh` из [последнего релиза](https://github.com/DalasDV/xkeen-resist-watcher/releases/latest)
 под своим GitHub-аккаунтом и скопируйте его на роутер. В Entware должен
@@ -77,19 +90,6 @@ sh /tmp/install.sh --private
 `Contents: Read` для этого репозитория. Установщик использует его для
 загрузки релиза. Ссылка VPN-подписки указывается отдельно по инструкции
 в конце установки.
-
-### Открытый репозиторий
-
-При открытом репозитории установщик можно получить прямо из Entware:
-
-```shell
-curl -fsSL https://github.com/DalasDV/xkeen-resist-watcher/releases/latest/download/install.sh \
-  -o /tmp/xkeen-resist-install.sh &&
-  sh /tmp/xkeen-resist-install.sh
-```
-
-После установки следуйте напечатанным шагам для приоритета Hysteria с
-резервом XHTTP. Ниже приведён также вариант для одного общего балансировщика.
 
 ### Crontab
 
