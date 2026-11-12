@@ -73,23 +73,9 @@ curl -fsSL https://github.com/DalasDV/xkeen-resist-watcher/releases/latest/downl
   sh /tmp/xkeen-resist-install.sh
 ```
 
-После установки следуйте напечатанным шагам для приоритета Hysteria с
+После установки следуйте шагам в мастере для приоритета Hysteria с
 резервом XHTTP. Ниже приведён также вариант для одного общего балансировщика.
 
-### Если репозиторий закрыт
-
-Скачайте `install.sh` из [последнего релиза](https://github.com/DalasDV/xkeen-resist-watcher/releases/latest)
-под своим GitHub-аккаунтом и скопируйте его на роутер. В Entware должен
-быть доступен `jq`. Запустите установщик в терминале:
-
-```shell
-sh /tmp/install.sh --private
-```
-
-В ответ на запрос введите GitHub fine-grained token с разрешением
-`Contents: Read` для этого репозитория. Установщик использует его для
-загрузки релиза. Ссылка VPN-подписки указывается отдельно по инструкции
-в конце установки.
 
 ### Crontab
 
