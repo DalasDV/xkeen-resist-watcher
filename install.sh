@@ -200,7 +200,7 @@ ACTUAL=${ACTUAL%% *}
 [ "${#EXPECTED}" -eq 64 ] && [ "$EXPECTED" = "$ACTUAL" ] || fail 'Контрольная сумма сборки не совпала.'
 
 chmod 755 "$STAGE/$ASSET"
-VERSION=$("$STAGE/$ASSET" version) || fail 'Новый бинарник не запустился. Проверьте архитектуру и версию Entware.'
+VERSION=$("$STAGE/$ASSET" version 2>&1) || fail 'Новый бинарник не запустился. Проверьте архитектуру и версию Entware.'
 [ -n "$VERSION" ] || fail 'Новый бинарник не сообщил версию.'
 
 set --
