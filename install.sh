@@ -55,93 +55,6 @@ cleanup() {
     rm -rf "$STAGE"
 }
 
-print_setup() {
-    cat <<'SETUP'
-
-   Если watcher уже запускается по расписанию, временно закомментируйте
-   его строку в crontab на время правок маршрутизации.
-
-1. Remnawave → Subscription Response Rules
-   Перед общим правилом выдачи добавьте правило:
-     user-agent EQUALS XKeen-Subscription-Watcher
-     responseType: XRAY_JSON
-
-2. /opt/etc/xray/configs/05_routing.json
-   В routing.balancers замените запись с тегом proxy двумя записями.
-   Остальные записи массива сохраните.
-
-   [
-     {
-       "tag": "proxy",
-       "selector": ["resist--hy2"],
-       "strategy": { "type": "leastPing" },
-       "fallbackTag": "to-resist-xhttp"
-     },
-     {
-       "tag": "proxy-xhttp",
-       "selector": ["resist--xhttp"],
-       "strategy": { "type": "leastPing" }
-     }
-   ]
-
-   В routing.rules первым добавьте правило:
-
-   {
-     "type": "field",
-     "inboundTag": ["resist-xhttp-fallback"],
-     "balancerTag": "proxy-xhttp"
-   }
-
-   Правила для трафика, который должен идти через VPN, направьте на
-   "balancerTag": "proxy". Если они уже ссылаются на этот балансировщик,
-   достаточно оставить их на месте.
-
-   В корне 05_routing.json добавьте burstObservatory, если его ещё нет:
-
-   {
-     "burstObservatory": {
-       "subjectSelector": ["resist"],
-       "pingConfig": {
-         "destination": "https://connectivitycheck.gstatic.com/generate_204",
-         "interval": "20s",
-         "sampling": 1,
-         "timeout": "5s"
-       }
-     }
-   }
-
-   Если burstObservatory уже настроен, добавьте "resist" в его subjectSelector.
-
-3. /opt/etc/xray/configs/04_outbounds.json
-   В ручной массив outbounds добавьте этот выход:
-
-   {
-     "tag": "to-resist-xhttp",
-     "protocol": "loopback",
-     "settings": { "inboundTag": "resist-xhttp-fallback" }
-   }
-
-4. Подставьте ссылку подписки после resist= и сгенерируйте выходы:
-
-   /opt/sbin/xkeen-subscription-watcher --protocol-tags --no-restart 'resist=<URL_ПОДПИСКИ>' &&
-     xray run -test -confdir /opt/etc/xray/configs &&
-     xkeen -restart
-
-   Продолжайте после успешной проверки Xray. Watcher должен сообщить
-   «Подписка "resist": Xray JSON.» и записать 04_outbounds.resist.json.
-
-5. Для обновления по расписанию откройте crontab -e. Если watcher уже
-   запускался из cron, отредактируйте и включите прежнюю строку. Для чистой установки
-   добавьте строку:
-
-   0 * * * * /opt/sbin/xkeen-subscription-watcher --protocol-tags 'resist=<URL_ПОДПИСКИ>'
-
-   Для двух групп уберите --single-proxy из строки watcher, если он был.
-   Если используете своё имя подписки или --output-dir, подставьте их
-   в команды и селекторы вместо resist и стандартного каталога.
-SETUP
-}
-
 case "${1:-}" in
     '') PRIVATE=0 ;;
     --private) PRIVATE=1 ;;
@@ -226,4 +139,8 @@ fi
 
 mv -f "$STAGE/$ASSET" "$WATCHER"
 echo "Установлен $WATCHER ($VERSION)."
-print_setup
+if [ -t 0 ]; then
+    "$WATCHER" setup
+else
+    echo "Чтобы настроить или заменить подписку, запустите $WATCHER setup"
+fi

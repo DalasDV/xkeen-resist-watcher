@@ -70,11 +70,13 @@ type subscriptionOutbound struct {
 }
 
 type xrayProfile struct {
-	Remarks   string           `json:"remarks"`
-	Outbounds []map[string]any `json:"outbounds"`
+	Remarks          string           `json:"remarks"`
+	Outbounds        []map[string]any `json:"outbounds"`
+	Routing          json.RawMessage  `json:"routing"`
+	BurstObservatory json.RawMessage  `json:"burstObservatory"`
 }
 
-func parseXraySubscription(body string) ([]subscriptionOutbound, error) {
+func decodeXrayProfiles(body string) ([]xrayProfile, error) {
 	if !json.Valid([]byte(body)) {
 		return nil, fmt.Errorf("некорректный Xray JSON")
 	}
@@ -90,7 +92,14 @@ func parseXraySubscription(body string) ([]subscriptionOutbound, error) {
 	} else if err := decoder.Decode(&profiles); err != nil {
 		return nil, fmt.Errorf("некорректный список профилей Xray JSON")
 	}
+	return profiles, nil
+}
 
+func parseXraySubscription(body string) ([]subscriptionOutbound, error) {
+	profiles, err := decodeXrayProfiles(body)
+	if err != nil {
+		return nil, err
+	}
 	var result []subscriptionOutbound
 	for _, profile := range profiles {
 		remarks := sanitizeProxyName(profile.Remarks)

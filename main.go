@@ -73,7 +73,7 @@ func newRootCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&dialerProxies, "dialer-proxies", nil,
 		"Dialer proxies через запятую.")
 
-	cmd.AddCommand(newVersionCmd())
+	cmd.AddCommand(newVersionCmd(), newSetupCmd(), newRefreshCmd())
 
 	return cmd
 }
@@ -225,16 +225,20 @@ func processSubscription(sub subscription, cfg config) (bool, error) {
 }
 
 func replaceOutboundFile(path string, content []byte) error {
+	mode := os.FileMode(0644)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	return replaceFile(path, content, mode)
+}
+
+func replaceFile(path string, content []byte, mode os.FileMode) error {
 	file, err := os.CreateTemp(filepath.Dir(path), ".outbounds-*")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(file.Name())
 	_, writeErr := file.Write(content)
-	mode := os.FileMode(0644)
-	if info, err := os.Stat(path); err == nil {
-		mode = info.Mode().Perm()
-	}
 	chmodErr := file.Chmod(mode)
 	closeErr := file.Close()
 	if err := errors.Join(writeErr, chmodErr, closeErr); err != nil {
