@@ -63,6 +63,17 @@ func TestSetupForOrdinarySubscription(t *testing.T) {
 	assertDeepEqual(t, name, "")
 	assertDeepEqual(t, profile.primary.Selector, []string{"hy2-", "xhttp-"})
 	assertDeepEqual(t, profile.backup.Tag, "")
+	routing, err := decodeXrayObject([]byte(`{"routing":{"rules":[{"type":"field","balancerTag":"proxy","network":"tcp,udp"}]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := configureManagedRouting(routing, nil, profile); err != nil {
+		t.Fatal(err)
+	}
+	burst := routing["burstObservatory"].(map[string]any)
+	if _, ok := burst["pingConfig"].(map[string]any); !ok {
+		t.Fatal("ordinary subscriptions need a valid burstObservatory.pingConfig")
+	}
 }
 
 func TestManagedCronMigratesOnlyMatchingJob(t *testing.T) {

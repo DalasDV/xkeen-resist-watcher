@@ -116,6 +116,14 @@ func configureManagedRouting(document, current jsonObject, profile managedProfil
 		}
 		document["burstObservatory"] = observatory
 	}
+	if burst, ok := document["burstObservatory"].(map[string]any); ok && burst["pingConfig"] == nil {
+		burst["pingConfig"] = jsonObject{
+			"destination": "https://connectivitycheck.gstatic.com/generate_204",
+			"interval":    "20s",
+			"sampling":    1,
+			"timeout":     "5s",
+		}
+	}
 	selectors := append(slices.Clone(profile.primary.Selector), profile.backup.Selector...)
 	for _, selector := range jsonStrings(observatory["subjectSelector"]) {
 		if selector != "resist" && selector != "resist--hy2" && selector != "resist--xhttp" &&
