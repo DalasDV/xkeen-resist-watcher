@@ -1,7 +1,8 @@
-# xkeen-subscription-watcher
+# XKeen Resist Watcher
 
-[![Test](https://github.com/tkukushkin/xkeen-subscription-watcher/actions/workflows/test.yml/badge.svg)](https://github.com/tkukushkin/xkeen-subscription-watcher/actions/workflows/test.yml)
-[![codecov](https://codecov.io/gh/tkukushkin/xkeen-subscription-watcher/graph/badge.svg)](https://codecov.io/gh/tkukushkin/xkeen-subscription-watcher)
+[![Test](https://github.com/DalasDV/xkeen-resist-watcher/actions/workflows/test.yml/badge.svg)](https://github.com/DalasDV/xkeen-resist-watcher/actions/workflows/test.yml)
+
+На основе [xkeen-subscription-watcher](https://github.com/tkukushkin/xkeen-subscription-watcher).
 
 ## Использование
 
@@ -14,6 +15,22 @@ xkeen-subscription-watcher <tag>=<url>
 Скрипт получает из переданных подписок прокси, генерирует конфиги `04_outbounds.<tag>.json`.
 
 Если конфиги изменились, выполняется `xkeen -restart`.
+
+### Xray JSON из Remnawave
+
+Watcher автоматически распознаёт массив профилей Xray или один объект с
+`outbounds`. Он переносит серверные выходы со всеми вложенными параметрами,
+префиксует их теги именем подписки и по возможности использует `remarks` как
+имя сервера. DNS, inbounds, routing и служебные выходы профиля остаются на
+стороне подписки. Если серверный выход ссылается на другие выходы по тегу,
+эти ссылки должны разрешаться в конфигурации роутера.
+
+Для Remnawave добавьте правило выдачи `XRAY_JSON` по User-Agent
+`XKeen-Subscription-Watcher` выше общего fallback. Выдача списков ссылок и
+Base64 также поддерживается. Для `hysteria2://` и `hy2://` доступны SNI,
+пин сертификата, ECH, Salamander/Gecko и диапазоны портов. Версия ядра Xray
+определяет, какие поля оно сможет применить. Пустой или некорректный ответ
+не заменяет существующий файл.
 
 ### Поддерживаемые протоколы
 
@@ -33,21 +50,46 @@ xkeen-subscription-watcher <tag>=<url>
 - `--output-dir <path>` — каталог для конфигов (по умолчанию `/opt/etc/xray/configs`)
 - `--no-restart` — не перезапускать XKeen после обновления
 - `--single-proxy` — брать только первый прокси из подписки
+- `--protocol-tags` — добавлять к тегам выходов `--hy2`, `--xhttp` или `--other` для отдельных селекторов балансировщика
 - `--reality-fingerprint <fp>` — переопределить fingerprint для Reality
 - `--dialer-proxies=<proxy1>,<proxy2>` — dialer proxies через запятую
 
 ## Установка
 
+Запускайте в оболочке Entware на роутере. Установщик определяет архитектуру,
+скачивает сборку из последнего релиза, сверяет SHA-256 и ставит её в
+`/opt/sbin/xkeen-subscription-watcher`. При обновлении прежний бинарник,
+конфиги Xray и запись расписания можно восстановить из указанной папки
+резервной копии. Рабочие файлы выходов обновляет сам watcher при первом
+успешном чтении подписки.
+
+### Приватный репозиторий
+
+Скачайте `install.sh` из [последнего релиза](https://github.com/DalasDV/xkeen-resist-watcher/releases/latest)
+под своим GitHub-аккаунтом и скопируйте его на роутер. В Entware должен
+быть доступен `jq`. Запустите установщик в терминале:
+
 ```shell
-curl -sSf https://raw.githubusercontent.com/tkukushkin/xkeen-subscription-watcher/master/install.sh | sh
+sh /tmp/install.sh --private
 ```
 
-Или вручную — скачать бинарник для своей архитектуры из [Releases](https://github.com/tkukushkin/xkeen-subscription-watcher/releases/latest):
+В ответ на запрос введите GitHub fine-grained token с разрешением
+`Contents: Read` для этого репозитория. Установщик использует его для
+загрузки релиза. Ссылка VPN-подписки указывается отдельно по инструкции
+в конце установки.
+
+### Открытый репозиторий
+
+При открытом репозитории установщик можно получить прямо из Entware:
 
 ```shell
-curl -sSLo /opt/sbin/xkeen-subscription-watcher <url-бинарника>
-chmod +x /opt/sbin/xkeen-subscription-watcher
+curl -fsSL https://github.com/DalasDV/xkeen-resist-watcher/releases/latest/download/install.sh \
+  -o /tmp/xkeen-resist-install.sh &&
+  sh /tmp/xkeen-resist-install.sh
 ```
+
+После установки следуйте напечатанным шагам для приоритета Hysteria с
+резервом XHTTP. Ниже приведён также вариант для одного общего балансировщика.
 
 ### Crontab
 

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -40,6 +41,7 @@ func newRootCmd() *cobra.Command {
 		outputDir          string
 		noRestart          bool
 		singleProxy        bool
+		protocolTags       bool
 		realityFingerprint string
 		dialerProxies      []string
 	)
@@ -53,6 +55,7 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			cfg.protocolTags = protocolTags
 			return execute(cfg)
 		},
 	}
@@ -63,6 +66,8 @@ func newRootCmd() *cobra.Command {
 		"Не перезапускать XKeen после обновления конфигураций.")
 	cmd.Flags().BoolVar(&singleProxy, "single-proxy", false,
 		"Брать только первый прокси из подписки и не добавлять имя к тегу.")
+	cmd.Flags().BoolVar(&protocolTags, "protocol-tags", false,
+		"Добавлять отдельные префиксы тегов для Hysteria2 и XHTTP.")
 	cmd.Flags().StringVar(&realityFingerprint, "reality-fingerprint", "",
 		"Переопределить fingerprint для Reality подключений.")
 	cmd.Flags().StringSliceVar(&dialerProxies, "dialer-proxies", nil,
@@ -100,6 +105,7 @@ type config struct {
 	restartXkeen       bool
 	dialerProxies      []string
 	singleProxy        bool
+	protocolTags       bool
 	realityFingerprint string
 }
 
@@ -153,10 +159,12 @@ func buildConfig(
 
 func execute(cfg config) error {
 	updated := false
+	var failures []error
 	for _, sub := range cfg.subscriptions {
 		changed, err := processSubscription(sub, cfg)
 		if err != nil {
 			log.Printf("Ошибка при обработке подписки %q, пропускаем: %v", sub.tag, err)
+			failures = append(failures, err)
 			continue
 		}
 		if changed {
@@ -164,6 +172,9 @@ func execute(cfg config) error {
 		}
 	}
 
+	if len(failures) == len(cfg.subscriptions) {
+		return errors.Join(failures...)
+	}
 	if !updated {
 		log.Println("Изменений в подписках не найдено, завершаем работу.")
 		return nil
@@ -205,53 +216,101 @@ func processSubscription(sub subscription, cfg config) (bool, error) {
 	}
 
 	log.Printf("Записываем новую конфигурацию для подписки %q в %s.", sub.tag, outputPath)
-	if err := os.WriteFile(outputPath, newContent, 0644); err != nil {
+	if err := replaceOutboundFile(outputPath, newContent); err != nil {
 		return false, fmt.Errorf("ошибка записи файла %s: %w", outputPath, err)
 	}
 
 	return true, nil
 }
 
-func getOutbounds(sub subscription, cfg config) ([]any, error) {
-	log.Printf("Запрашиваем URL подписки: %s.", sub.url)
+func replaceOutboundFile(path string, content []byte) error {
+	file, err := os.CreateTemp(filepath.Dir(path), ".outbounds-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	_, writeErr := file.Write(content)
+	mode := os.FileMode(0644)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	chmodErr := file.Chmod(mode)
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, chmodErr, closeErr); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), path)
+}
 
-	proxyURLs, err := fetchProxyURLs(sub)
+func getOutbounds(sub subscription, cfg config) ([]any, error) {
+	body, err := fetchSubscription(sub)
 	if err != nil {
 		return nil, err
 	}
-	sort.Strings(proxyURLs)
-
-	tagCounters := make(map[string]int)
-	var result []any
-
-	for _, proxyURL := range proxyURLs {
-		p, err := parseProxyURL(proxyURL)
+	var entries []subscriptionOutbound
+	if strings.HasPrefix(body, "[") || strings.HasPrefix(body, "{") {
+		log.Printf("Подписка %q: Xray JSON.", sub.tag)
+		entries, err = parseXraySubscription(body)
 		if err != nil {
-			log.Printf("Не удалось распарсить URL прокси %q из подписки %q, пропускаем: %v", proxyURL, sub.tag, err)
-			continue
+			return nil, err
 		}
+	} else {
+		log.Printf("Подписка %q: список ссылок.", sub.tag)
+		entries = parseLinkOutbounds(body, sub.tag, cfg.singleProxy)
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("в подписке %q нет серверных выходов", sub.tag)
+	}
 
-		tag := sub.tag
-		if !cfg.singleProxy {
-			if name := getProxyName(proxyURL); name != "" {
-				tag = tag + "--" + name
-			}
+	usedTags := make(map[string]bool)
+	var result []any
+	for _, entry := range entries {
+		baseTag := sub.tag
+		if cfg.protocolTags {
+			baseTag = protocolTag(baseTag, entry.config)
 		}
-
-		tagCounters[tag]++
-		if tagCounters[tag] > 1 {
-			tag = fmt.Sprintf("%s--%d", tag, tagCounters[tag])
+		if !cfg.singleProxy && entry.name != "" {
+			baseTag += "--" + entry.name
 		}
-
-		result = append(result, generateOutbound(p, tag, cfg.realityFingerprint, ""))
-		for _, dp := range cfg.dialerProxies {
-			result = append(result, generateOutbound(p, tag+"--"+dp, cfg.realityFingerprint, dp))
+		tag := reserveOutboundTag(usedTags, baseTag)
+		result = append(result, configureOutbound(entry.config, tag, cfg.realityFingerprint, ""))
+		for _, dialer := range cfg.dialerProxies {
+			dialerTag := reserveOutboundTag(usedTags, tag+"--"+dialer)
+			result = append(result, configureOutbound(entry.config, dialerTag, cfg.realityFingerprint, dialer))
 		}
-
 		if cfg.singleProxy {
 			break
 		}
 	}
-
 	return result, nil
+}
+
+func reserveOutboundTag(used map[string]bool, base string) string {
+	tag := base
+	for suffix := 2; used[tag]; suffix++ {
+		tag = fmt.Sprintf("%s--%d", base, suffix)
+	}
+	used[tag] = true
+	return tag
+}
+
+func parseLinkOutbounds(body, subscriptionTag string, singleProxy bool) []subscriptionOutbound {
+	proxyURLs := parseSubscriptionResponse(body)
+	sort.Strings(proxyURLs)
+	var result []subscriptionOutbound
+	for index, proxyURL := range proxyURLs {
+		p, err := parseProxyURL(proxyURL)
+		if err != nil {
+			log.Printf("Не удалось разобрать прокси №%d из подписки %q, пропускаем.", index+1, subscriptionTag)
+			continue
+		}
+		result = append(result, subscriptionOutbound{
+			name:   getProxyName(proxyURL),
+			config: generateOutbound(p),
+		})
+		if singleProxy {
+			break
+		}
+	}
+	return result
 }

@@ -551,9 +551,8 @@ func TestHysteria2Subscription(t *testing.T) {
 						"allowInsecure": true,
 					},
 					"hysteriaSettings": map[string]any{
-						"version":         float64(2),
-						"auth":            "myauth",
-						"keepAlivePeriod": float64(5),
+						"version": float64(2),
+						"auth":    "myauth",
 					},
 				},
 			},

@@ -1,59 +1,25 @@
 name: Release
 
 on:
-  release:
-    types: [created]
+  push:
+    tags: ['v*']
 
 jobs:
-  build:
-    name: Build
+  release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
-    strategy:
-      matrix:
-        include:
-        - goos: linux
-          goarch: arm64
-          suffix: arm64
-        - goos: linux
-          goarch: arm
-          goarm: "7"
-          suffix: armv7
-        - goos: linux
-          goarch: mipsle
-          gomips: softfloat
-          suffix: mipsel
-        - goos: linux
-          goarch: mips
-          gomips: softfloat
-          suffix: mips
-
     steps:
-    - name: Checkout
-      uses: actions/checkout@v6
-
-    - name: Setup Go
-      uses: actions/setup-go@v6
-      with:
-        go-version-file: go.mod
-
-    - name: Build
-      env:
-        GOOS: ${{ matrix.goos }}
-        GOARCH: ${{ matrix.goarch }}
-        GOARM: ${{ matrix.goarm }}
-        GOMIPS: ${{ matrix.gomips }}
-        CGO_ENABLED: "0"
-      run: go build -trimpath -ldflags="-s -w -X main.version=${{ github.event.release.tag_name }}" -o xkeen-subscription-watcher-linux-${{ matrix.suffix }} .
-
-    - name: Compress binary
-      run: |
-        sudo apt-get update && sudo apt-get install -y upx-ucl
-        upx --best xkeen-subscription-watcher-linux-${{ matrix.suffix }}
-
-    - name: Upload release asset
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: gh release upload "${{ github.event.release.tag_name }}" xkeen-subscription-watcher-linux-${{ matrix.suffix }}
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+      - run: sh build-release.sh "$GITHUB_REF_NAME"
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes \
+            install.sh dist/SHA256SUMS dist/xkeen-subscription-watcher-linux-*

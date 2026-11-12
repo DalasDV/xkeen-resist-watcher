@@ -1,11 +1,13 @@
 package main
 
-import "net/url"
+import (
+	"maps"
+	"net/url"
+)
 
 // buildStreamSettings builds the streamSettings block shared by the TLS/transport
-// family (vless, vmess, trojan). fingerprintOverride applies to the reality branch
-// only (it is sourced from --reality-fingerprint).
-func buildStreamSettings(sp streamParams, address, fingerprintOverride string) map[string]any {
+// family (vless, vmess, trojan).
+func buildStreamSettings(sp streamParams, address string) map[string]any {
 	ss := map[string]any{
 		"network":  sp.network,
 		"security": sp.security,
@@ -13,10 +15,7 @@ func buildStreamSettings(sp streamParams, address, fingerprintOverride string) m
 
 	switch sp.security {
 	case "reality":
-		fingerprint := fingerprintOverride
-		if fingerprint == "" {
-			fingerprint = sp.fingerprint
-		}
+		fingerprint := sp.fingerprint
 		if fingerprint == "" {
 			fingerprint = "chrome"
 		}
@@ -104,7 +103,7 @@ func buildStreamSettings(sp streamParams, address, fingerprintOverride string) m
 	return ss
 }
 
-func generateOutbound(p proxy, tag string, realityFingerprint string, dialerProxy string) map[string]any {
+func generateOutbound(p proxy) map[string]any {
 	var proxyConfig map[string]any
 
 	switch p := p.(type) {
@@ -126,7 +125,7 @@ func generateOutbound(p proxy, tag string, realityFingerprint string, dialerProx
 					},
 				},
 			},
-			"streamSettings": buildStreamSettings(p.streamParams, p.address, realityFingerprint),
+			"streamSettings": buildStreamSettings(p.streamParams, p.address),
 		}
 
 	case vmessProxy:
@@ -147,7 +146,7 @@ func generateOutbound(p proxy, tag string, realityFingerprint string, dialerProx
 					},
 				},
 			},
-			"streamSettings": buildStreamSettings(p.streamParams, p.address, realityFingerprint),
+			"streamSettings": buildStreamSettings(p.streamParams, p.address),
 		}
 
 	case trojanProxy:
@@ -164,7 +163,7 @@ func generateOutbound(p proxy, tag string, realityFingerprint string, dialerProx
 			"settings": map[string]any{
 				"servers": []any{server},
 			},
-			"streamSettings": buildStreamSettings(p.streamParams, p.address, realityFingerprint),
+			"streamSettings": buildStreamSettings(p.streamParams, p.address),
 		}
 
 	case shadowSocksProxy:
@@ -183,49 +182,56 @@ func generateOutbound(p proxy, tag string, realityFingerprint string, dialerProx
 		}
 
 	case hysteria2Proxy:
-		sni := p.sni
-		if sni == "" {
-			sni = p.address
-		}
-		proxyConfig = map[string]any{
-			"protocol": "hysteria",
-			"settings": map[string]any{
-				"version": 2,
-				"address": p.address,
-				"port":    p.port,
-			},
-			"streamSettings": map[string]any{
-				"network":  "hysteria",
-				"security": "tls",
-				"tlsSettings": map[string]any{
-					"serverName":    sni,
-					"allowInsecure": p.insecure,
-				},
-				"hysteriaSettings": map[string]any{
-					"version":         2,
-					"auth":            p.auth,
-					"keepAlivePeriod": 5,
-				},
-			},
-		}
+		return p.outbound()
 
 	default:
 		panic("unreachable")
 	}
 
-	result := map[string]any{"tag": tag}
-	for k, v := range proxyConfig {
-		result[k] = v
+	return proxyConfig
+}
+
+func protocolTag(prefix string, outbound map[string]any) string {
+	if outbound["protocol"] == "hysteria" {
+		return prefix + "--hy2"
+	}
+	stream, _ := outbound["streamSettings"].(map[string]any)
+	switch stream["network"] {
+	case "xhttp", "splithttp":
+		return prefix + "--xhttp"
+	default:
+		return prefix + "--other"
+	}
+}
+
+func configureOutbound(base map[string]any, tag, realityFingerprint, dialerProxy string) map[string]any {
+	result := maps.Clone(base)
+	result["tag"] = tag
+	if realityFingerprint == "" && dialerProxy == "" {
+		return result
 	}
 
+	stream, _ := base["streamSettings"].(map[string]any)
+	stream = maps.Clone(stream)
+	if reality, ok := stream["realitySettings"].(map[string]any); ok && realityFingerprint != "" {
+		reality = maps.Clone(reality)
+		reality["fingerprint"] = realityFingerprint
+		stream["realitySettings"] = reality
+	}
 	if dialerProxy != "" {
-		ss, ok := result["streamSettings"].(map[string]any)
-		if !ok {
-			ss = map[string]any{}
-			result["streamSettings"] = ss
+		if stream == nil {
+			stream = make(map[string]any)
 		}
-		ss["sockopt"] = map[string]any{"dialerProxy": dialerProxy}
+		sockopt, _ := stream["sockopt"].(map[string]any)
+		sockopt = maps.Clone(sockopt)
+		if sockopt == nil {
+			sockopt = make(map[string]any)
+		}
+		sockopt["dialerProxy"] = dialerProxy
+		stream["sockopt"] = sockopt
 	}
-
+	if stream != nil {
+		result["streamSettings"] = stream
+	}
 	return result
 }

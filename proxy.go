@@ -74,16 +74,6 @@ type shadowSocksProxy struct {
 
 func (shadowSocksProxy) isProxy() {}
 
-type hysteria2Proxy struct {
-	address  string
-	port     int
-	auth     string
-	insecure bool
-	sni      string
-}
-
-func (hysteria2Proxy) isProxy() {}
-
 // flexInt unmarshals a JSON value that may be either a number or a quoted string
 // (vmess subscriptions are inconsistent about port/aid types).
 type flexInt int
@@ -103,6 +93,9 @@ func (f *flexInt) UnmarshalJSON(data []byte) error {
 }
 
 func parseProxyURL(rawURL string) (proxy, error) {
+	if strings.HasPrefix(rawURL, "hysteria2://") || strings.HasPrefix(rawURL, "hy2://") {
+		return parseHysteria2URL(rawURL)
+	}
 	if strings.HasPrefix(rawURL, "vmess://") {
 		return parseVmess(rawURL)
 	}
@@ -195,19 +188,6 @@ func parseProxyURL(rawURL string) (proxy, error) {
 			port:     port,
 			method:   method,
 			password: password,
-		}, nil
-
-	case "hysteria2":
-		auth := ""
-		if u.User != nil {
-			auth = u.User.Username()
-		}
-		return hysteria2Proxy{
-			address:  u.Hostname(),
-			port:     port,
-			auth:     auth,
-			insecure: query.Get("insecure") == "1",
-			sni:      query.Get("sni"),
 		}, nil
 
 	default:
