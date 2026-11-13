@@ -143,7 +143,7 @@ func TestManagedSetupRefreshWithXray(t *testing.T) {
 		t.Skip("set XKEEN_TEST_XRAY to run against the real Xray executable")
 	}
 	root := t.TempDir()
-	paths := managedPaths{configDir: filepath.Join(root, "configs"), stateDir: filepath.Join(root, "state"), detectHWID: func() string { return hardwareID("serial", "test-router") }}
+	paths := managedPaths{configDir: filepath.Join(root, "configs"), stateDir: filepath.Join(root, "state")}
 	bin := filepath.Join(root, "bin")
 	for _, dir := range []string{paths.configDir, bin} {
 		if err := os.Mkdir(dir, 0700); err != nil {
@@ -209,8 +209,9 @@ if [ -e "$TEST_FAIL" ]; then rm "$TEST_FAIL"; exit 1; fi
 	response.Store(managedFeed)
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Hwid") != hardwareID("serial", "test-router") {
-			t.Error("subscription request must carry the hardware-derived HWID")
+		hwid, err := os.ReadFile(filepath.Join(paths.stateDir, "hwid"))
+		if err != nil || r.Header.Get("X-Hwid") != strings.TrimSpace(string(hwid)) || len(r.Header.Get("X-Hwid")) != 64 {
+			t.Error("subscription request must carry the persisted HWID")
 		}
 		requests.Add(1)
 		io.WriteString(w, response.Load().(string))

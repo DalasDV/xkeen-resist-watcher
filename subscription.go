@@ -23,10 +23,10 @@ var (
 	errHWIDLimit    = errors.New("в подписке достигнут лимит устройств")
 )
 
-func fetchSubscription(sub subscription, detectHWID func() string) (string, error) {
-	hwid := detectHWID()
-	if hwid == "" {
-		return "", fmt.Errorf("не удалось определить аппаратный HWID: серийный номер и постоянный MAC недоступны")
+func fetchSubscription(sub subscription, stateDir string) (string, error) {
+	hwid, err := loadHWID(stateDir, routerHWID)
+	if err != nil {
+		return "", fmt.Errorf("не удалось загрузить или сохранить HWID: %w", err)
 	}
 	body, err := doHTTPRequest(sub.url, hwid, false)
 	if errors.Is(err, errHWIDRequired) || errors.Is(err, errHWIDLimit) {

@@ -48,7 +48,7 @@ func newRootCmd(paths managedPaths) *cobra.Command {
 				return err
 			}
 			cfg.protocolTags = protocolTags
-			cfg.detectHWID = paths.detectHWID
+			cfg.stateDir = paths.stateDir
 			return execute(cfg)
 		},
 	}
@@ -94,7 +94,7 @@ func newVersionCmd() *cobra.Command {
 }
 
 type config struct {
-	detectHWID         func() string
+	stateDir           string
 	subscriptions      []subscription
 	outputDir          string
 	restartXkeen       bool
@@ -242,7 +242,7 @@ func replaceFile(path string, content []byte, mode os.FileMode) error {
 }
 
 func getOutbounds(sub subscription, cfg config) ([]any, error) {
-	body, err := fetchSubscription(sub, cfg.detectHWID)
+	body, err := fetchSubscription(sub, cfg.stateDir)
 	if err != nil {
 		return nil, err
 	}

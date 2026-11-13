@@ -2,23 +2,70 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
+
+// Keep the first usable ID even if the firmware later exposes a different source.
+func loadHWID(stateDir string, detect func() string) (string, error) {
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		return "", err
+	}
+	lock, err := os.OpenFile(filepath.Join(stateDir, "hwid.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return "", err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return "", err
+	}
+	path := filepath.Join(stateDir, "hwid")
+	data, err := os.ReadFile(path)
+	if err == nil {
+		id := strings.TrimSpace(string(data))
+		decoded, decodeErr := hex.DecodeString(id)
+		if decodeErr != nil || len(decoded) != sha256.Size {
+			return "", fmt.Errorf("некорректный HWID в %s", path)
+		}
+		return id, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+
+	id := detect()
+	if id == "" {
+		var random [sha256.Size]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return "", err
+		}
+		id = hex.EncodeToString(random[:])
+		log.Print("Аппаратный ID недоступен. Watcher создаёт постоянный локальный HWID.")
+	}
+	if err := replaceFile(path, []byte(id+"\n"), 0600); err != nil {
+		return "", err
+	}
+	return id, nil
+}
 
 func routerHWID() string {
 	if runtime.GOOS != "linux" {
 		return ""
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	path := routerCommand("ndmc").Path
 	// KeeneticOS can put ndmc outside the PATH inherited by Entware cron.
@@ -30,10 +77,9 @@ func routerHWID() string {
 			}
 		}
 	}
-	if output, err := exec.CommandContext(ctx, path, "-c", "show defaults").Output(); err == nil {
-		if serial := keeneticSerial(string(output)); serial != "" {
-			return hardwareID("serial", serial)
-		}
+	defaults := readKeeneticDefaults(ctx, path)
+	if serial := keeneticSerial(defaults); serial != "" {
+		return hardwareID("serial", serial)
 	}
 	for _, path := range []string{
 		"/sys/firmware/devicetree/base/serial-number",
@@ -49,14 +95,39 @@ func routerHWID() string {
 	if mac := permanentEthernetMAC("/sys/class/net"); mac != "" {
 		return hardwareID("mac", mac)
 	}
+	if serviceTag := keeneticServiceTag(defaults); serviceTag != "" {
+		return hardwareID("servicetag", serviceTag)
+	}
 	return ""
 }
 
+func readKeeneticDefaults(ctx context.Context, path string) string {
+	// Like the shell pipeline, use complete fields from stdout even if ndmc exits with an error.
+	output, err := exec.CommandContext(ctx, path, "-c", "show defaults").Output()
+	if err != nil && ctx.Err() != nil {
+		// A timeout can interrupt ndmc in the middle of printing an identifier.
+		output = output[:strings.LastIndexByte(string(output), '\n')+1]
+	}
+	return string(output)
+}
+
 func keeneticSerial(defaults string) string {
+	return usableSerial(keeneticDefault(defaults, "serial"))
+}
+
+func keeneticServiceTag(defaults string) string {
+	tag := strings.ReplaceAll(keeneticDefault(defaults, "servicetag"), "-", "")
+	if len(tag) != 15 || strings.Trim(tag, "0") == "" || strings.Trim(tag, "0123456789") != "" {
+		return ""
+	}
+	return tag
+}
+
+func keeneticDefault(defaults, field string) string {
 	for _, line := range strings.Split(defaults, "\n") {
 		key, value, ok := strings.Cut(line, ":")
-		if ok && strings.EqualFold(strings.TrimSpace(key), "serial") {
-			return usableSerial(value)
+		if ok && strings.EqualFold(strings.TrimSpace(key), field) {
+			return strings.Trim(value, " \t\r\n\x00")
 		}
 	}
 	return ""

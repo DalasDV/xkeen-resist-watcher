@@ -30,15 +30,13 @@ type managedSubscription struct {
 }
 
 type managedPaths struct {
-	configDir  string
-	stateDir   string
-	detectHWID func() string
+	configDir string
+	stateDir  string
 }
 
 var routerPaths = managedPaths{
-	configDir:  "/opt/etc/xray/configs",
-	stateDir:   "/opt/etc/xkeen-subscription-watcher",
-	detectHWID: routerHWID,
+	configDir: "/opt/etc/xray/configs",
+	stateDir:  "/opt/etc/xkeen-subscription-watcher",
 }
 
 func (p managedPaths) newSetupCmd() *cobra.Command {
@@ -167,7 +165,7 @@ func (p managedPaths) update(address, mode string, out io.Writer) error {
 			}
 		}
 	}
-	body, err := fetchSubscription(subscription{tag: managedTag, url: settings.URL}, p.detectHWID)
+	body, err := fetchSubscription(subscription{tag: managedTag, url: settings.URL}, p.stateDir)
 	if err != nil {
 		return fmt.Errorf("не удалось получить подписку: %w", err)
 	}
