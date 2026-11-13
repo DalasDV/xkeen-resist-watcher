@@ -204,16 +204,30 @@ func (p managedPaths) loadXrayConfigs() ([]xrayConfigFile, int, error) {
 	return files, activeRouting, nil
 }
 
-func (p managedPaths) prepareXrayChanges(profile managedProfile, tag string, balance bool) ([]routerChange, error) {
+func (p managedPaths) prepareXrayChanges(profile managedProfile, previousTag, tag string, balance bool) ([]routerChange, error) {
 	outbounds, err := readRouterFile(filepath.Join(p.configDir, "04_outbounds."+tag+".json"))
 	if err != nil {
 		return nil, err
+	}
+	previousFile := outbounds
+	var changes []routerChange
+	if previousTag != tag {
+		previousFile, err = readRouterFile(filepath.Join(p.configDir, "04_outbounds."+previousTag+".json"))
+		if err != nil {
+			return nil, err
+		}
+		if previousFile.exists {
+			if outbounds.exists {
+				return nil, fmt.Errorf("файлы %s и %s уже существуют; проверьте, какой принадлежит Watcher", previousFile.path, outbounds.path)
+			}
+			changes = append(changes, routerChange{before: previousFile, remove: true})
+		}
 	}
 	if !balance {
 		nodes := slices.DeleteFunc(slices.Clone(profile.outbounds), func(node jsonObject) bool {
 			return node["protocol"] == "loopback"
 		})
-		return appendXrayChange(nil, outbounds, jsonObject{"outbounds": nodes})
+		return appendXrayChange(changes, outbounds, jsonObject{"outbounds": nodes})
 	}
 
 	current, err := p.dumpXray("-confdir", p.configDir)
@@ -225,8 +239,8 @@ func (p managedPaths) prepareXrayChanges(profile managedProfile, tag string, bal
 		return nil, err
 	}
 	var previousOutbounds []jsonObject
-	if outbounds.exists {
-		previous, err := decodeXrayObject(outbounds.data)
+	if previousFile.exists {
+		previous, err := decodeXrayObject(previousFile.data)
 		if err != nil {
 			return nil, fmt.Errorf("не удалось прочитать текущий файл выходов watcher")
 		}
@@ -236,11 +250,14 @@ func (p managedPaths) prepareXrayChanges(profile managedProfile, tag string, bal
 	if err != nil {
 		return nil, err
 	}
-	changes, err := appendXrayChange(nil, outbounds, jsonObject{"outbounds": proxies})
+	changes, err = appendXrayChange(changes, outbounds, jsonObject{"outbounds": proxies})
 	if err != nil {
 		return nil, err
 	}
 	for i, file := range files {
+		if previousTag != tag && file.original.path == previousFile.path {
+			continue
+		}
 		document := file.document
 		if i == activeRouting {
 			if err := configureManagedRouting(document, current, profile); err != nil {
@@ -422,7 +439,7 @@ func (p managedPaths) testXrayChanges(changes []routerChange) error {
 		}
 	}
 	for _, change := range changes {
-		if err := os.WriteFile(filepath.Join(stage, filepath.Base(change.before.path)), change.data, 0600); err != nil {
+		if err := change.apply(filepath.Join(stage, filepath.Base(change.before.path))); err != nil {
 			return err
 		}
 	}

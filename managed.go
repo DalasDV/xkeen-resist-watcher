@@ -39,7 +39,7 @@ var routerPaths = managedPaths{
 	stateDir:  "/opt/etc/xkeen-subscription-watcher",
 }
 
-func newSetupCmd() *cobra.Command {
+func (p managedPaths) newSetupCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "setup",
 		Short: "Настроить или заменить подписку на роутере",
@@ -64,18 +64,18 @@ func newSetupCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return routerPaths.update(address, mode, out)
+			return p.update(address, mode, out)
 		},
 	}
 }
 
-func newRefreshCmd() *cobra.Command {
+func (p managedPaths) newRefreshCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "refresh",
 		Short: "Обновить настроенную подписку",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return routerPaths.update("", "", cmd.OutOrStdout())
+			return p.update("", "", cmd.OutOrStdout())
 		},
 	}
 }
@@ -153,7 +153,19 @@ func (p managedPaths) update(address, mode string, out io.Writer) error {
 	if settings.Mode != modeBalance && settings.Mode != modeOutbounds {
 		return fmt.Errorf("не выбран режим обновления, запустите %s setup", watcherPath)
 	}
-	body, err := fetchSubscription(subscription{tag: managedTag, url: settings.URL})
+	if isSetup {
+		if err := routerCommand("crontab").Err; err != nil {
+			return fmt.Errorf("нет crontab; установите пакет cron в Entware")
+		}
+	}
+	if settings.Mode == modeBalance {
+		for _, name := range []string{"xray", "xkeen"} {
+			if err := routerCommand(name).Err; err != nil {
+				return fmt.Errorf("нет %s; установите XKeen с ядром Xray или выберите режим «Только серверы»", name)
+			}
+		}
+	}
+	body, err := fetchSubscription(subscription{tag: managedTag, url: settings.URL}, p.stateDir)
 	if err != nil {
 		return fmt.Errorf("не удалось получить подписку: %w", err)
 	}
@@ -172,12 +184,17 @@ func (p managedPaths) update(address, mode string, out io.Writer) error {
 			return err
 		}
 	}
-	files, err := p.prepareXrayChanges(profile, settings.Tag, settings.Mode == modeBalance)
+	previousTag := settings.Tag
+	if previousTag == "resist" {
+		settings.Tag = managedTag
+	}
+	renaming := previousTag != settings.Tag
+	files, err := p.prepareXrayChanges(profile, previousTag, settings.Tag, settings.Mode == modeBalance)
 	if err != nil {
 		return err
 	}
 	configChanged := len(files) != 0
-	if isSetup {
+	if isSetup || renaming {
 		data, err := encodeXrayObject(settings)
 		if err != nil {
 			return err
@@ -188,7 +205,9 @@ func (p managedPaths) update(address, mode string, out io.Writer) error {
 			return fmt.Errorf("не удалось скопировать конфиги Xray: %w", err)
 		}
 		fmt.Fprintf(out, "Копия конфигов Xray: %s\n", backup)
-		backup, err = p.backupSetup(previous, oldCron)
+	}
+	if isSetup {
+		backup, err := p.backupSetup(previous, oldCron)
 		if err != nil {
 			return err
 		}
@@ -226,6 +245,14 @@ type routerChange struct {
 	before routerFile
 	data   []byte
 	mode   os.FileMode
+	remove bool
+}
+
+func (change routerChange) apply(path string) error {
+	if change.remove {
+		return os.Remove(path)
+	}
+	return replaceFile(path, change.data, change.mode)
 }
 
 func readRouterFile(path string) (routerFile, error) {
@@ -304,7 +331,7 @@ func applyRouterChanges(files []routerChange, oldCron, newCron []byte, restart b
 		return cause
 	}
 	for index, file := range files {
-		if err := replaceFile(file.before.path, file.data, file.mode); err != nil {
+		if err := file.apply(file.before.path); err != nil {
 			return rollback(err, files[:index], false, false)
 		}
 	}

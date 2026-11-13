@@ -207,7 +207,13 @@ if [ -e "$TEST_FAIL" ]; then rm "$TEST_FAIL"; exit 1; fi
 
 	var response atomic.Value
 	response.Store(managedFeed)
+	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hwid, err := os.ReadFile(filepath.Join(paths.stateDir, "hwid"))
+		if err != nil || r.Header.Get("X-Hwid") != strings.TrimSpace(string(hwid)) || len(r.Header.Get("X-Hwid")) != 64 {
+			t.Error("subscription request must carry the persisted HWID")
+		}
+		requests.Add(1)
 		io.WriteString(w, response.Load().(string))
 	}))
 	defer server.Close()
@@ -258,6 +264,7 @@ if [ -e "$TEST_FAIL" ]; then rm "$TEST_FAIL"; exit 1; fi
 		t.Fatal(err)
 	}
 	assertDeepEqual(t, string(read(log)), "restart\n")
+	assertDeepEqual(t, requests.Load(), int32(2))
 	outputPath := filepath.Join(paths.configDir, "04_outbounds.watcher.json")
 	response.Store(strings.ReplaceAll(managedFeed, "192.0.2.10", "192.0.2.15"))
 	write(fail, "", 0600)
@@ -287,6 +294,45 @@ if [ -e "$TEST_FAIL" ]; then rm "$TEST_FAIL"; exit 1; fi
 		t.Fatal("refresh did not migrate the fixed outbound or preserve the local probe")
 	}
 
+	legacyOutput := filepath.Join(paths.configDir, "04_outbounds.resist.json")
+	expected := read(outputPath)
+	if err := os.Rename(outputPath, legacyOutput); err != nil {
+		t.Fatal(err)
+	}
+	legacyState := strings.Replace(string(read(state)), `"tag": "watcher"`, `"tag": "resist"`, 1)
+	write(state, legacyState, 0600)
+	write(outputPath, "another configuration", 0600)
+	if err := paths.update("", "", io.Discard); err == nil || !strings.Contains(err.Error(), "уже существуют") {
+		t.Fatalf("expected a filename conflict, got %v", err)
+	}
+	assertDeepEqual(t, string(read(outputPath)), "another configuration")
+	if err := os.Remove(outputPath); err != nil {
+		t.Fatal(err)
+	}
+	write(fail, "", 0600)
+	if err := paths.update("", "", io.Discard); err == nil {
+		t.Fatal("expected rollback after restart failure during rename")
+	}
+	assertDeepEqual(t, read(legacyOutput), expected)
+	assertDeepEqual(t, string(read(state)), legacyState)
+	if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
+		t.Fatalf("new file should be removed during rollback: %v", err)
+	}
+	if err := paths.update("", "", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	assertDeepEqual(t, read(outputPath), expected)
+	if _, err := os.Stat(legacyOutput); !os.IsNotExist(err) {
+		t.Fatalf("legacy file should be removed after migration: %v", err)
+	}
+	if err := json.Unmarshal(read(state), &saved); err != nil || saved.Tag != "watcher" {
+		t.Fatalf("expected saved watcher tag: %v", err)
+	}
+	snapshots, err = os.ReadDir(backupRoot)
+	if err != nil || len(snapshots) != 3 {
+		t.Fatalf("expected snapshots before both migration attempts: %v", err)
+	}
+
 	restarts := read(log)
 	before := read(routePath)
 	messages.Reset()
@@ -299,7 +345,7 @@ if [ -e "$TEST_FAIL" ]; then rm "$TEST_FAIL"; exit 1; fi
 		t.Fatal("nodes-only mode generated a loopback or restarted XKeen")
 	}
 	snapshots, err = os.ReadDir(backupRoot)
-	if err != nil || len(snapshots) != 2 {
+	if err != nil || len(snapshots) != 4 {
 		t.Fatalf("expected separate backups after rerunning setup: %v", err)
 	}
 	response.Store(strings.ReplaceAll(managedFeed, "192.0.2.10", "192.0.2.16"))

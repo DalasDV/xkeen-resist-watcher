@@ -115,7 +115,11 @@ func makeTrojanURL(password, host string, port int, fragment string, params map[
 
 func runMain(t *testing.T, args ...string) error {
 	t.Helper()
-	return run(args)
+	cmd := newRootCmd(managedPaths{stateDir: t.TempDir()})
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs(args)
+	return cmd.Execute()
 }
 
 func assertDeepEqual(t *testing.T, got, want any) {
@@ -387,7 +391,7 @@ func TestDoesNotRewriteUnchangedConfig(t *testing.T) {
 		fmt.Sprintf("stable=%s/sub", srv.URL),
 	}
 
-	if err := run(args); err != nil {
+	if err := runMain(t, args...); err != nil {
 		t.Fatalf("first run failed: %v", err)
 	}
 
@@ -404,7 +408,7 @@ func TestDoesNotRewriteUnchangedConfig(t *testing.T) {
 
 	time.Sleep(20 * time.Millisecond)
 
-	if err := run(args); err != nil {
+	if err := runMain(t, args...); err != nil {
 		t.Fatalf("second run failed: %v", err)
 	}
 
@@ -455,7 +459,7 @@ func TestContinuesWhenOneSubscriptionFails(t *testing.T) {
 
 func TestErrorForSubscriptionWithoutSeparator(t *testing.T) {
 	tmpDir := t.TempDir()
-	err := run([]string{"--output-dir", tmpDir, "--no-restart", "broken"})
+	err := runMain(t, []string{"--output-dir", tmpDir, "--no-restart", "broken"}...)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -466,12 +470,12 @@ func TestErrorForSubscriptionWithoutSeparator(t *testing.T) {
 
 func TestErrorForDuplicateTags(t *testing.T) {
 	tmpDir := t.TempDir()
-	err := run([]string{
+	err := runMain(t, []string{
 		"--output-dir", tmpDir,
 		"--no-restart",
 		"dup=http://example.com/one",
 		"dup=http://example.com/two",
-	})
+	}...)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -482,11 +486,11 @@ func TestErrorForDuplicateTags(t *testing.T) {
 
 func TestErrorForInvalidURLScheme(t *testing.T) {
 	tmpDir := t.TempDir()
-	err := run([]string{
+	err := runMain(t, []string{
 		"--output-dir", tmpDir,
 		"--no-restart",
 		"demo=ftp://example.com/sub",
-	})
+	}...)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -496,7 +500,7 @@ func TestErrorForInvalidURLScheme(t *testing.T) {
 }
 
 func TestVersionCommand(t *testing.T) {
-	cmd := newRootCmd()
+	cmd := newRootCmd(managedPaths{stateDir: t.TempDir()})
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
 
@@ -1102,7 +1106,7 @@ func TestParseProxyURLErrors(t *testing.T) {
 
 func TestNoSubscriptionsError(t *testing.T) {
 	tmpDir := t.TempDir()
-	err := run([]string{"--output-dir", tmpDir, "--no-restart"})
+	err := runMain(t, []string{"--output-dir", tmpDir, "--no-restart"}...)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -1118,11 +1122,11 @@ func TestErrorWhenOutputDirIsNotDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := run([]string{
+	err := runMain(t, []string{
 		"--output-dir", outputPath,
 		"--no-restart",
 		"demo=http://example.com/sub",
-	})
+	}...)
 	if err == nil {
 		t.Fatal("expected error")
 	}

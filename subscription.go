@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -9,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -20,8 +23,11 @@ var (
 	errHWIDLimit    = errors.New("в подписке достигнут лимит устройств")
 )
 
-func fetchSubscription(sub subscription) (string, error) {
-	hwid := routerHWID()
+func fetchSubscription(sub subscription, stateDir string) (string, error) {
+	hwid, err := loadHWID(stateDir, routerHWID)
+	if err != nil {
+		return "", fmt.Errorf("не удалось загрузить или сохранить HWID: %w", err)
+	}
 	body, err := doHTTPRequest(sub.url, hwid, false)
 	if errors.Is(err, errHWIDRequired) || errors.Is(err, errHWIDLimit) {
 		return "", err
@@ -38,12 +44,22 @@ func fetchSubscription(sub subscription) (string, error) {
 }
 
 func doHTTPRequest(requestURL, hwid string, withProxy bool) (string, error) {
-	var transport *http.Transport
+	transport := &http.Transport{}
+	defer transport.CloseIdleConnections()
 	if withProxy {
 		proxyURL, _ := url.Parse("http://127.0.0.1:8080")
-		transport = &http.Transport{Proxy: http.ProxyURL(proxyURL)}
-	} else {
-		transport = &http.Transport{}
+		transport.Proxy = http.ProxyURL(proxyURL)
+	}
+	if os.Getenv("SSL_CERT_FILE") == "" && os.Getenv("SSL_CERT_DIR") == "" {
+		if pem, err := os.ReadFile("/opt/etc/ssl/certs/ca-certificates.crt"); err == nil {
+			roots, err := x509.SystemCertPool()
+			if err != nil {
+				roots = x509.NewCertPool()
+			}
+			if roots.AppendCertsFromPEM(pem) {
+				transport.TLSClientConfig = &tls.Config{RootCAs: roots}
+			}
+		}
 	}
 
 	client := &http.Client{
@@ -121,14 +137,32 @@ func parseXraySubscription(body string) ([]subscriptionOutbound, error) {
 	var result []subscriptionOutbound
 	for _, profile := range profiles {
 		var routing struct {
-			Balancers []json.RawMessage `json:"balancers"`
+			Balancers []struct {
+				Tag string `json:"tag"`
+			} `json:"balancers"`
+			Rules []struct {
+				BalancerTag string `json:"balancerTag"`
+			} `json:"rules"`
 		}
 		if len(profile.Routing) > 0 {
 			if err := json.Unmarshal(profile.Routing, &routing); err != nil {
 				return nil, fmt.Errorf("некорректный routing в профиле Xray JSON")
 			}
 		}
-		if len(routing.Balancers) > 0 {
+		balancerTags := make(map[string]bool, len(routing.Balancers))
+		for _, balancer := range routing.Balancers {
+			if balancer.Tag != "" {
+				balancerTags[balancer.Tag] = true
+			}
+		}
+		usesBalancer := false
+		for _, rule := range routing.Rules {
+			if balancerTags[rule.BalancerTag] {
+				usesBalancer = true
+				break
+			}
+		}
+		if usesBalancer {
 			continue
 		}
 		remarks := strings.TrimSpace(profile.Remarks)

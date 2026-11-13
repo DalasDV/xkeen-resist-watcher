@@ -1,14 +1,15 @@
 # XKeen Resist Watcher
 
-[![Test](https://github.com/DalasDV/xkeen-resist-watcher/actions/workflows/test.yml/badge.svg)](https://github.com/DalasDV/xkeen-resist-watcher/actions/workflows/test.yml)
+[![Test](https://github.com/DalasDV/xkeen-watcher-json/actions/workflows/test.yml/badge.svg)](https://github.com/DalasDV/xkeen-watcher-json/actions/workflows/test.yml)
 
 На основе [xkeen-subscription-watcher](https://github.com/tkukushkin/xkeen-subscription-watcher).
 
 ## Отличия форка
 
 XKeen Resist Watcher — самостоятельный форк. Помимо импорта подписок по
-ссылкам, он читает Xray JSON из Remnawave, пропускает профили с готовыми
-балансировщиками и сохраняет имена нод и параметры их подключений. Запросы
+ссылкам, он читает Xray JSON из Remnawave, пропускает профили, в которых
+правило ссылается на объявленный балансировщик, и сохраняет имена нод
+и параметры их подключений. Запросы
 подписки отправляют аппаратный HWID, когда роутер предоставляет данные для
 его вычисления. У форка свой установщик из публичных релизов GitHub и мастер
 с резервным копированием Xray, расписанием обновлений и выбором режима.
@@ -77,9 +78,9 @@ Base64 также поддерживается. Для `hysteria2://` и `hy2://
 В терминале Entware:
 
 ```shell
-curl -fsSL https://github.com/DalasDV/xkeen-resist-watcher/releases/latest/download/install.sh \
-  -o /tmp/xkeen-resist-install.sh &&
-  sh /tmp/xkeen-resist-install.sh
+curl -fsSL https://github.com/DalasDV/xkeen-watcher-json/releases/latest/download/install.sh \
+  -o /tmp/xkeen-watcher-install.sh &&
+  sh /tmp/xkeen-watcher-install.sh
 ```
 
 ### Шаги мастера
@@ -120,14 +121,36 @@ curl -fsSL https://github.com/DalasDV/xkeen-resist-watcher/releases/latest/downl
 обновления сохранённой подписки используйте
 `/opt/sbin/xkeen-subscription-watcher refresh`.
 
+При обновлении старый управляемый файл `04_outbounds.resist.json` переходит
+на имя `04_outbounds.watcher.json`. Watcher сохраняет копию в `watcher-backup`
+и сообщает о конфликте, если оба файла уже существуют.
+
 ### HWID роутера
 
-Watcher отправляет `x-hwid` при загрузке подписки. Он хеширует серийный номер
-устройства, а если он недоступен — постоянный MAC физического интерфейса.
-При переустановке с тем же аппаратным источником получается тот же HWID.
-Если роутер не предоставляет ни одного из этих значений, заголовок опускается.
+Watcher отправляет `X-Hwid` при каждой загрузке подписки, включая `refresh`
+из cron. При первом запуске он использует SHA-256 от серийного номера или
+постоянного MAC. Если оба источника недоступны, он генерирует случайный ID.
+Готовый идентификатор сохраняется в `/opt/etc/xkeen-subscription-watcher/hwid`
+и используется при следующих запросах. Ошибка чтения или записи этого файла
+прерывает обновление с сообщением об ошибке. Значение HWID в журнал не выводится.
+Чтобы сохранить случайный ID при полной переустановке Entware, сохраните
+этот файл и восстановите его на том же роутере. На другой роутер файл не переносите.
 При включённом лимите устройств роутер занимает собственное место в подписке.
 См. [документацию Remnawave](https://docs.rw/features/hwid-device-limit/).
+
+### Зависимости Entware
+
+- Для скачивания нужен `curl` с доступом к доверенным CA. Если его нет,
+  установите `curl` и `ca-certificates` через `opkg`. Watcher также учитывает
+  CA из `/opt/etc/ssl/certs/ca-certificates.crt`.
+- Установщик проверяет SHA-256 через `sha256sum` или соответствующий applet
+  BusyBox. Если их нет, установите `coreutils-sha256sum`. Генерация HWID
+  происходит внутри бинарника и этой команды не требует.
+- Мастеру нужен пакет `cron` и запущенный `crond`. Если служба не работает,
+  запустите `/opt/etc/init.d/S10cron start`, если этот скрипт есть в вашей сборке
+  Entware. [Документация Entware](https://github.com/Entware/Entware/wiki/Using-Cron)
+- Для автоматической балансировки нужны установленные XKeen и Xray.
+  Бинарник Watcher собирается с `CGO_ENABLED=0` для ARM64, ARMv7, MIPS и MIPSel.
 
 
 ### Crontab

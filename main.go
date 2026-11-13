@@ -20,7 +20,7 @@ var version = "dev"
 
 func main() {
 	log.SetFlags(log.LstdFlags)
-	cmd := newRootCmd()
+	cmd := newRootCmd(routerPaths)
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
 	if err := cmd.Execute(); err != nil {
@@ -28,15 +28,7 @@ func main() {
 	}
 }
 
-func run(args []string) error {
-	cmd := newRootCmd()
-	cmd.SilenceUsage = true
-	cmd.SilenceErrors = true
-	cmd.SetArgs(args)
-	return cmd.Execute()
-}
-
-func newRootCmd() *cobra.Command {
+func newRootCmd(paths managedPaths) *cobra.Command {
 	var (
 		outputDir          string
 		noRestart          bool
@@ -56,6 +48,7 @@ func newRootCmd() *cobra.Command {
 				return err
 			}
 			cfg.protocolTags = protocolTags
+			cfg.stateDir = paths.stateDir
 			return execute(cfg)
 		},
 	}
@@ -73,7 +66,7 @@ func newRootCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&dialerProxies, "dialer-proxies", nil,
 		"Dialer proxies через запятую.")
 
-	cmd.AddCommand(newVersionCmd(), newSetupCmd(), newRefreshCmd())
+	cmd.AddCommand(newVersionCmd(), paths.newSetupCmd(), paths.newRefreshCmd())
 
 	return cmd
 }
@@ -101,6 +94,7 @@ func newVersionCmd() *cobra.Command {
 }
 
 type config struct {
+	stateDir           string
 	subscriptions      []subscription
 	outputDir          string
 	restartXkeen       bool
@@ -248,7 +242,7 @@ func replaceFile(path string, content []byte, mode os.FileMode) error {
 }
 
 func getOutbounds(sub subscription, cfg config) ([]any, error) {
-	body, err := fetchSubscription(sub)
+	body, err := fetchSubscription(sub, cfg.stateDir)
 	if err != nil {
 		return nil, err
 	}

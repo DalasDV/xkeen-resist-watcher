@@ -2,16 +2,63 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
+
+// Keep the first usable ID even if the firmware later exposes a different source.
+func loadHWID(stateDir string, detect func() string) (string, error) {
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		return "", err
+	}
+	lock, err := os.OpenFile(filepath.Join(stateDir, "hwid.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return "", err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return "", err
+	}
+	path := filepath.Join(stateDir, "hwid")
+	data, err := os.ReadFile(path)
+	if err == nil {
+		id := strings.TrimSpace(string(data))
+		decoded, decodeErr := hex.DecodeString(id)
+		if decodeErr != nil || len(decoded) != sha256.Size {
+			return "", fmt.Errorf("некорректный HWID в %s", path)
+		}
+		return id, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+
+	id := detect()
+	if id == "" {
+		var random [sha256.Size]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return "", err
+		}
+		id = hex.EncodeToString(random[:])
+		log.Print("Аппаратный ID недоступен. Watcher создаёт постоянный локальный HWID.")
+	}
+	if err := replaceFile(path, []byte(id+"\n"), 0600); err != nil {
+		return "", err
+	}
+	return id, nil
+}
 
 func routerHWID() string {
 	if runtime.GOOS != "linux" {
@@ -21,6 +68,15 @@ func routerHWID() string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	path := routerCommand("ndmc").Path
+	// KeeneticOS can put ndmc outside the PATH inherited by Entware cron.
+	if path == "ndmc" {
+		for _, candidate := range []string{"/bin/ndmc", "/usr/bin/ndmc"} {
+			if executable, err := exec.LookPath(candidate); err == nil {
+				path = executable
+				break
+			}
+		}
+	}
 	if output, err := exec.CommandContext(ctx, path, "-c", "show defaults").Output(); err == nil {
 		if serial := keeneticSerial(string(output)); serial != "" {
 			return hardwareID("serial", serial)
@@ -54,7 +110,7 @@ func keeneticSerial(defaults string) string {
 }
 
 func usableSerial(value string) string {
-	serial := strings.ToLower(strings.Trim(strings.TrimSpace(value), "\x00"))
+	serial := strings.ToLower(strings.Trim(value, " \t\r\n\x00"))
 	switch serial {
 	case "", "none", "unknown", "not specified", "not applicable", "default string", "system serial number", "to be filled by o.e.m.":
 		return ""

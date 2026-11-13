@@ -10,6 +10,25 @@ import (
 	"testing"
 )
 
+func TestXraySubscriptionSkipsOnlyReferencedBalancers(t *testing.T) {
+	const outbound = `"outbounds":[{"tag":"node","protocol":"hysteria","settings":{}}]`
+	const balancer = `"balancers":[{"tag":"pool"}]`
+	body := `[
+		{"remarks":"Used",` + outbound + `,"routing":{` + balancer + `,"rules":[{"balancerTag":"pool"}]}},
+		{"remarks":"Unused",` + outbound + `,"routing":{` + balancer + `,"rules":[{"outboundTag":"node"}]}},
+		{"remarks":"Unknown reference",` + outbound + `,"routing":{` + balancer + `,"rules":[{"balancerTag":"other"}]}}
+	]`
+	entries, err := parseXraySubscription(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range entries {
+		names = append(names, entry.name)
+	}
+	assertDeepEqual(t, names, []string{"Unused", "Unknown reference"})
+}
+
 func TestXrayJSONSubscriptionPreservesOutbounds(t *testing.T) {
 	const hysteria = `{
 		"tag": "proxy",
