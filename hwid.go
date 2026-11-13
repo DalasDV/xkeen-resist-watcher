@@ -2,63 +2,16 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
-	"fmt"
-	"log"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 	"time"
 )
-
-// Keep the first usable ID even if the firmware later exposes a different source.
-func loadHWID(stateDir string, detect func() string) (string, error) {
-	if err := os.MkdirAll(stateDir, 0700); err != nil {
-		return "", err
-	}
-	lock, err := os.OpenFile(filepath.Join(stateDir, "hwid.lock"), os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return "", err
-	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return "", err
-	}
-	path := filepath.Join(stateDir, "hwid")
-	data, err := os.ReadFile(path)
-	if err == nil {
-		id := strings.TrimSpace(string(data))
-		decoded, decodeErr := hex.DecodeString(id)
-		if decodeErr != nil || len(decoded) != sha256.Size {
-			return "", fmt.Errorf("некорректный HWID в %s", path)
-		}
-		return id, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-
-	id := detect()
-	if id == "" {
-		var random [sha256.Size]byte
-		if _, err := rand.Read(random[:]); err != nil {
-			return "", err
-		}
-		id = hex.EncodeToString(random[:])
-		log.Print("Аппаратный ID недоступен. Watcher создаёт постоянный локальный HWID.")
-	}
-	if err := replaceFile(path, []byte(id+"\n"), 0600); err != nil {
-		return "", err
-	}
-	return id, nil
-}
 
 func routerHWID() string {
 	if runtime.GOOS != "linux" {

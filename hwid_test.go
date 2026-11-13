@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 )
 
@@ -22,56 +21,19 @@ func TestHardwareID(t *testing.T) {
 	}
 }
 
-func TestHWIDPersistsAcrossSourceChanges(t *testing.T) {
-	dir := t.TempDir()
+func TestEverySubscriptionFetchComputesHWID(t *testing.T) {
 	want := hardwareID("serial", "test-device")
-	id, err := loadHWID(dir, func() string { return want })
-	if err != nil || id != want {
-		t.Fatalf("first HWID: %q, %v", id, err)
-	}
-	id, err = loadHWID(dir, func() string { t.Fatal("re-probed saved HWID"); return "" })
-	if err != nil || id != want {
-		t.Fatalf("saved HWID: %q, %v", id, err)
-	}
-}
-
-func TestConcurrentHWIDFallback(t *testing.T) {
-	dir := t.TempDir()
-	var calls sync.WaitGroup
-	results := make(chan string, 8)
-	for range cap(results) {
-		calls.Go(func() {
-			id, err := loadHWID(dir, func() string { return "" })
-			if err != nil {
-				t.Error(err)
-			}
-			results <- id
-		})
-	}
-	calls.Wait()
-	close(results)
-	want := <-results
-	if len(want) != 64 {
-		t.Fatalf("invalid fallback HWID: %q", want)
-	}
-	for id := range results {
-		assertDeepEqual(t, id, want)
-	}
-	other, err := loadHWID(t.TempDir(), func() string { return "" })
-	if err != nil || len(other) != 64 || other == want {
-		t.Fatalf("expected distinct fallback for another installation: %v", err)
-	}
-}
-
-func TestEverySubscriptionFetchSendsSavedHWID(t *testing.T) {
-	dir := t.TempDir()
-	want := hardwareID("serial", "test-device")
-	if _, err := loadHWID(dir, func() string { return want }); err != nil {
-		t.Fatal(err)
+	calls := 0
+	detect := func() string {
+		calls++
+		if calls == 3 {
+			return ""
+		}
+		return want
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Hwid") != want {
-			t.Error("missing saved HWID on subscription request")
+			t.Error("missing hardware-derived HWID on subscription request")
 		}
 		if r.URL.Path == "/redirect" {
 			http.Redirect(w, r, "/subscription", http.StatusFound)
@@ -80,10 +42,14 @@ func TestEverySubscriptionFetchSendsSavedHWID(t *testing.T) {
 		w.Write([]byte("subscription"))
 	}))
 	defer server.Close()
+	sub := subscription{tag: "test", url: server.URL + "/redirect"}
 	for range 2 {
-		if body, err := fetchSubscription(subscription{tag: "test", url: server.URL + "/redirect"}, dir); err != nil || body != "subscription" {
+		if body, err := fetchSubscription(sub, detect); err != nil || body != "subscription" {
 			t.Fatalf("unexpected response: %q, %v", body, err)
 		}
+	}
+	if _, err := fetchSubscription(sub, detect); err == nil || calls != 3 {
+		t.Fatalf("expected a fresh hardware lookup and an error on missing HWID, calls=%d: %v", calls, err)
 	}
 }
 

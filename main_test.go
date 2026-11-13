@@ -115,7 +115,7 @@ func makeTrojanURL(password, host string, port int, fragment string, params map[
 
 func runMain(t *testing.T, args ...string) error {
 	t.Helper()
-	cmd := newRootCmd(managedPaths{stateDir: t.TempDir()})
+	cmd := newRootCmd(managedPaths{detectHWID: func() string { return hardwareID("serial", "test-router") }})
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
 	cmd.SetArgs(args)
@@ -500,7 +500,7 @@ func TestErrorForInvalidURLScheme(t *testing.T) {
 }
 
 func TestVersionCommand(t *testing.T) {
-	cmd := newRootCmd(managedPaths{stateDir: t.TempDir()})
+	cmd := newRootCmd(managedPaths{detectHWID: func() string { return hardwareID("serial", "test-router") }})
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
 
